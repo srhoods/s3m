@@ -1,0 +1,11 @@
+# Build artifacts
+bin/
+obj/
+*.o
+*.d
+core
+core.*
+.claude/
+
+# Local test environment (MinIO data, credentials)
+testenv/
