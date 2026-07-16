@@ -29,6 +29,9 @@ operations into minutes.
 | `s3m-rm` | Parallel remover: exact keys, prefixes and glob masks, batched deletes, dry-run by default, non-overridable whole-bucket guard, `--permanent` version destruction | [docs/s3m-rm.md](docs/s3m-rm.md) |
 | `s3m-ver` | Version & delete-marker manager: list everything stored, prune with `--keep N` / `--older-than`, tombstone cleanup, undelete; dry-run by default | [docs/s3m-ver.md](docs/s3m-ver.md) |
 | `s3m-sync` | Parallel synchroniser: local↔S3 and S3↔S3, size/mtime/checksum comparison, `--delete`, multipart uploads, atomic downloads; dry-run by default | [docs/s3m-sync.md](docs/s3m-sync.md) |
+| `s3m-cp` | Parallel server-side copy: prefix and exact-key mappings, skip-existing unless `--overwrite`, `--move` renames, multipart `UploadPartCopy` >5 GiB; dry-run by default | [docs/s3m-cp.md](docs/s3m-cp.md) |
+| `s3m-find` | Parallel find: classic expression grammar (`! ( ) -a -o`), object tests (`-name -key -regex -size -mtime -class -etag -empty`), `--versions` with `-latest`/`-marker`, `-print0`; deliberately no `-delete`/`-exec` | [docs/s3m-find.md](docs/s3m-find.md) |
+| `s3m-diff` | Parallel comparison: keys, sizes, conclusive etags by default, `-c` ranged-GET content verification stopping at the first differing byte, diff-like exit codes and a plain-language verdict | [docs/s3m-diff.md](docs/s3m-diff.md) |
 
 Shared connection behaviour (endpoints, credentials, addressing,
 retries) is documented in [docs/connection.md](docs/connection.md).

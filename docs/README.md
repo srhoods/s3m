@@ -10,3 +10,6 @@ Per-tool user documentation:
 | [s3m-rm.md](s3m-rm.md) | Parallel object remover |
 | [s3m-ver.md](s3m-ver.md) | Version & delete-marker manager |
 | [s3m-sync.md](s3m-sync.md) | Parallel synchroniser |
+| [s3m-cp.md](s3m-cp.md) | Parallel server-side copy |
+| [s3m-find.md](s3m-find.md) | Parallel find |
+| [s3m-diff.md](s3m-diff.md) | Parallel bucket/prefix comparison |
