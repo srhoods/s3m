@@ -346,21 +346,35 @@ void s3m_stack_destroy(s3m_stack *s)
     pthread_cond_destroy(&s->cv);
 }
 
-char *s3m_job_make(const char *prefix, int depth)
+char *s3m_job_make(const char *bucket, const char *prefix, int depth)
 {
     if (depth > 9)
         depth = 9;
-    return s3m_strdupf("%c%s", '0' + depth, prefix);
+    return s3m_strdupf("%c%s\x01%s", '0' + depth, bucket, prefix);
 }
 
-void s3m_push_job(s3m_stack *s, const char *prefix, int depth)
+void s3m_push_job(s3m_stack *s, const char *bucket, const char *prefix,
+                  int depth)
 {
-    char *j = s3m_job_make(prefix, depth);
+    char *j = s3m_job_make(bucket, prefix, depth);
     if (!j) {
         s3m_note_error(prefix, "queue", "out of memory");
         return;
     }
     s3m_stack_push_batch(s, &j, 1);
+}
+
+int s3m_job_parse(char *job, char **bucket, char **prefix)
+{
+    if (job[0] < '0' || job[0] > '9')
+        return -1;
+    char *sep = strchr(job + 1, '\x01');
+    if (!sep)
+        return -1;
+    *sep = '\0';
+    *bucket = job + 1;
+    *prefix = sep + 1;
+    return job[0] - '0';
 }
 
 /* ------------------------------------------------------------------ */
@@ -1640,7 +1654,7 @@ int s3m_list_job(s3m_http *h, s3m_stack *stk, const char *bucket,
                     snprintf(owndisp, sizeof owndisp, "%s", x.text);
             } else if (in_cp) {
                 if (!strcmp(x.tag, "Prefix") && stk)
-                    s3m_push_job(stk, x.text, depth + 1);
+                    s3m_push_job(stk, bucket, x.text, depth + 1);
             } else if (in_entry) {
                 if (!strcmp(x.tag, "Key"))
                     snprintf(keybuf, sizeof keybuf, "%s", x.text);

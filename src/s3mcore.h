@@ -79,9 +79,12 @@ char *s3m_stack_pop(s3m_stack *s);
 size_t s3m_stack_pending(s3m_stack *s);
 void  s3m_stack_destroy(s3m_stack *s);
 
-/* listing jobs are "<depth digit><prefix>" strings */
-char *s3m_job_make(const char *prefix, int depth);
-void  s3m_push_job(s3m_stack *s, const char *prefix, int depth);
+/* listing jobs are "<depth digit><bucket>\x01<prefix>" strings */
+char *s3m_job_make(const char *bucket, const char *prefix, int depth);
+void  s3m_push_job(s3m_stack *s, const char *bucket, const char *prefix,
+                   int depth);
+/* splits a popped job in place; returns the depth, or -1 if malformed */
+int   s3m_job_parse(char *job, char **bucket, char **prefix);
 
 /* ---- buffered, thread-safe output ------------------------------------ */
 
