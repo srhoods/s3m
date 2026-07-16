@@ -9,3 +9,6 @@ core.*
 
 # Local test environment (MinIO data, credentials)
 testenv/
+
+# Project brief (not for version control)
+BRIEF.md
