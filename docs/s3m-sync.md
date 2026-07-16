@@ -1,13 +1,14 @@
 # s3m-sync — parallel synchroniser
 
 `s3m-sync` makes a destination match a source, copying only what is new
-or changed, in any of three directions:
+or changed, in any of four directions:
 
 | SRC | DST | Mode |
 |-----|-----|------|
 | local directory | `s3://…` | upload |
 | `s3://…` | local directory | download |
 | `s3://…` | `s3://…` | server-side copy (same endpoint) |
+| local directory | local directory | parallel local mirror |
 
 **By default nothing is changed**: the tool prints the plan as CSV and
 stops; `--apply` executes it.
@@ -25,7 +26,7 @@ s3m-sync [OPTIONS] SRC DST
 | `--apply` | Actually copy/delete. Without it the run is a dry run — per s3m convention there is no `--dry-run` flag, because that is the default state. |
 | `--delete` | Also remove destination entries that do not exist in the source (shown explicitly in the dry run as `delete` / `delete-local` rows). |
 | `--size-only` | Compare by size alone; ignore timestamps. |
-| `--checksum` | Compare content: local MD5 against the object etag where the etag is conclusive (single-part uploads); multipart etags fall back to size+mtime. S3→S3 compares etags directly. |
+| `--checksum` | Compare content: local MD5 against the object etag where the etag is conclusive (single-part uploads); multipart etags fall back to size+mtime. S3→S3 compares etags directly; local→local hashes both files. |
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallel listing, 0–9 (default 2). |
 | `-o, --output FILE` | Write the CSV plan/report to `FILE` and show a live progress display. |
@@ -87,6 +88,14 @@ non-deterministic in apply mode.
   Objects over 5 GiB (the single-request `CopyObject` limit) are copied
   with multipart `UploadPartCopy` in 1 GiB parts, aborted server-side
   on failure. Both buckets must be on the same endpoint/credentials.
+- Local→local mirrors copy through a temporary file renamed into place
+  (readers never see a half-written file), use `copy_file_range` where
+  the filesystem supports it (reflink/server-side clone on XFS/Btrfs/
+  NFS 4.2) with a read/write fallback across devices, and preserve the
+  source mtime so re-runs converge. Syncing a directory into itself or
+  its own subtree is refused before any work starts — including a
+  destination that does not exist yet but would be created inside the
+  source.
 - Symbolic links are never followed or synced; special files are
   skipped.
 
@@ -138,6 +147,9 @@ s3m-sync --checksum --apply s3://prod/assets ./assets
 
 # Replicate between buckets, server-side
 s3m-sync --apply s3://prod-site/static s3://staging-site/static
+
+# Mirror a local tree to another disk, pruning deleted files
+s3m-sync --apply --delete /data/projects /mnt/backup/projects
 ```
 
 ## Behaviour notes

@@ -3,12 +3,12 @@
  *
  * Part of s3m: Parallel S3 Object Manager
  *
- * Synchronises a local directory with a bucket/prefix, or two
- * buckets/prefixes, in either direction: local→S3 (upload), S3→local
- * (download) and S3→S3 (server-side copy). Copies only what is new or
- * changed; --delete removes destination entries absent from the
- * source. Dry run by default: --apply is the only way to change
- * anything.
+ * Synchronises a local directory with a bucket/prefix, two
+ * buckets/prefixes, or two local directories: local→S3 (upload),
+ * S3→local (download), S3→S3 (server-side copy) and local→local
+ * (parallel mirror). Copies only what is new or changed; --delete
+ * removes destination entries absent from the source. Dry run by
+ * default: --apply is the only way to change anything.
  *
  * Three phases: index the destination (parallel listing / local walk),
  * diff the source against the index to build the action plan, then
@@ -30,9 +30,9 @@
 #include <unistd.h>
 
 
-#define S3M_SYNC_VERSION "1.1.0"
+#define S3M_SYNC_VERSION "1.2.0"
 
-enum smode { M_UPLOAD, M_DOWNLOAD, M_REMOTE };
+enum smode { M_UPLOAD, M_DOWNLOAD, M_REMOTE, M_LOCAL };
 
 struct side {
     bool  is_s3;
@@ -190,7 +190,8 @@ static void act_add(enum akind kind, const char *rel, uint64_t size,
 static const char *action_name(enum akind k)
 {
     if (k == A_DELETE)
-        return g.mode == M_DOWNLOAD ? "delete-local" : "delete";
+        return (g.mode == M_DOWNLOAD || g.mode == M_LOCAL)
+               ? "delete-local" : "delete";
     switch (g.mode) {
     case M_UPLOAD:   return "upload";
     case M_DOWNLOAD: return "download";
@@ -250,6 +251,17 @@ static void diff_entry(const char *rel, uint64_t size, time_t mtime,
         else if (g.mode == M_REMOTE && src_etag && src_etag[0] &&
                  d->etag[0])
             copy = strcasecmp(src_etag, d->etag) != 0;
+        else if (g.mode == M_LOCAL) {
+            /* both sides are files: hash them both */
+            char smd5[33], dmd5[33];
+            char *dp = s3m_strdupf("%s/%s", dst.dir, rel);
+            if (dp && s3m_file_md5(local_path, smd5) == 0 &&
+                s3m_file_md5(dp, dmd5) == 0)
+                copy = strcmp(smd5, dmd5) != 0;
+            else
+                copy = mtime > d->mtime;
+            free(dp);
+        }
         else
             copy = mtime > d->mtime;
         free(dlpath);
@@ -390,6 +402,101 @@ static void walk_local(const char *root, size_t rootlen, bool indexing)
 /* transfers (the heavy lifting lives in s3mcore)                       */
 /* ------------------------------------------------------------------ */
 
+/* local→local: atomic copy via a temp file in the target directory,
+ * copy_file_range with a read/write fallback, source mtime preserved
+ * so re-runs converge */
+static int local_copy_file(const char *spath, const char *dpath,
+                           time_t mtime, char *err, size_t errsz)
+{
+    if (s3m_mkdirs_for(dpath) != 0) {
+        snprintf(err, errsz, "mkdir: %s", strerror(errno));
+        return -1;
+    }
+    int sfd = open(spath, O_RDONLY | O_CLOEXEC);
+    if (sfd < 0) {
+        snprintf(err, errsz, "open: %s", strerror(errno));
+        return -1;
+    }
+    char *tmp = s3m_strdupf("%s.s3m-tmp-XXXXXX", dpath);
+    int dfd = tmp ? mkstemp(tmp) : -1;
+    if (dfd < 0) {
+        snprintf(err, errsz, "mkstemp: %s", strerror(errno));
+        close(sfd);
+        free(tmp);
+        return -1;
+    }
+
+    int rc = 0;
+    static __thread char *cpbuf;          /* 1 MiB fallback buffer */
+    for (;;) {
+        ssize_t r = copy_file_range(sfd, NULL, dfd, NULL,
+                                    (size_t)4 << 20, 0);
+        if (r > 0) {
+            atomic_fetch_add_explicit(&bytes_done, (uint64_t)r,
+                                      memory_order_relaxed);
+            continue;
+        }
+        if (r == 0)
+            break;
+        if (errno != EINVAL && errno != EXDEV &&
+            errno != ENOSYS && errno != EOPNOTSUPP) {
+            snprintf(err, errsz, "copy: %s", strerror(errno));
+            rc = -1;
+            break;
+        }
+        /* fall back to read/write (cross-device etc.) */
+        if (!cpbuf && !(cpbuf = malloc(1 << 20))) {
+            snprintf(err, errsz, "out of memory");
+            rc = -1;
+            break;
+        }
+        for (;;) {
+            ssize_t n = read(sfd, cpbuf, 1 << 20);
+            if (n == 0)
+                break;
+            if (n < 0) {
+                snprintf(err, errsz, "read: %s", strerror(errno));
+                rc = -1;
+                break;
+            }
+            char *p = cpbuf;
+            while (n > 0) {
+                ssize_t w = write(dfd, p, (size_t)n);
+                if (w < 0) {
+                    snprintf(err, errsz, "write: %s", strerror(errno));
+                    rc = -1;
+                    break;
+                }
+                p += w;
+                n -= w;
+            }
+            if (rc != 0)
+                break;
+            atomic_fetch_add_explicit(&bytes_done,
+                                      (uint64_t)(p - cpbuf),
+                                      memory_order_relaxed);
+        }
+        break;
+    }
+    close(sfd);
+    if (rc == 0) {
+        if (mtime != (time_t)-1) {
+            struct timespec ts[2] = { { mtime, 0 }, { mtime, 0 } };
+            futimens(dfd, ts);
+        }
+        if (close(dfd) != 0 || rename(tmp, dpath) != 0) {
+            snprintf(err, errsz, "rename: %s", strerror(errno));
+            rc = -1;
+        }
+    } else {
+        close(dfd);
+    }
+    if (rc != 0)
+        unlink(tmp);
+    free(tmp);
+    return rc;
+}
+
 /* execute one copy action; returns 0, or -1 with a message in err */
 static int do_copy(s3m_http *h, const struct action *a,
                    char *err, size_t errsz)
@@ -420,7 +527,7 @@ static int do_copy(s3m_http *h, const struct action *a,
             snprintf(err, errsz, "out of memory");
         free(path);
         free(key);
-    } else {                          /* M_REMOTE: server-side copy */
+    } else if (g.mode == M_REMOTE) {  /* server-side copy */
         char *skey = s3m_strdupf("%s%s", src.prefix, a->rel);
         char *dkey = s3m_strdupf("%s%s", dst.prefix, a->rel);
         if (skey && dkey)
@@ -428,6 +535,15 @@ static int do_copy(s3m_http *h, const struct action *a,
                                  a->size, &bytes_done, err, errsz);
         free(skey);
         free(dkey);
+    } else {                          /* M_LOCAL */
+        char *spath = s3m_strdupf("%s/%s", src.dir, a->rel);
+        char *dpath = s3m_strdupf("%s/%s", dst.dir, a->rel);
+        if (spath && dpath)
+            rc = local_copy_file(spath, dpath, a->mtime, err, errsz);
+        else
+            snprintf(err, errsz, "out of memory");
+        free(spath);
+        free(dpath);
     }
     return rc;
 }
@@ -483,7 +599,7 @@ static void *exec_worker(void *arg)
         s3m_set_current(a->rel);
 
         if (a->kind == A_DELETE) {
-            if (g.mode == M_DOWNLOAD) {
+            if (g.mode == M_DOWNLOAD || g.mode == M_LOCAL) {
                 char *path = s3m_strdupf("%s/%s", dst.dir, a->rel);
                 if (path && (unlink(path) == 0 || errno == ENOENT)) {
                     atomic_fetch_add_explicit(&n_deleted, 1,
@@ -582,7 +698,7 @@ static void prog_draw(double rate, int frame)
     snprintf(bytestr, sizeof bytestr, "%s / %s", bdv, btv);
     snprintf(ratestr, sizeof ratestr, "%s/s", rv);
 
-    static const char *modes[] = { "upload", "download", "copy" };
+    static const char *modes[] = { "upload", "download", "copy", "local" };
 
     char buf[4096];
     size_t off = 0;
@@ -624,7 +740,7 @@ static void print_summary(double elapsed)
     uint64_t bd   = atomic_load(&bytes_done);
     uint64_t errs = atomic_load(&s3m_nerrors);
 
-    static const char *modes[] = { "upload", "download", "copy" };
+    static const char *modes[] = { "upload", "download", "copy", "local" };
 
     char sv[32], kv[32], cv[32], tv[32], dv[32], tdv[32], ev[32],
          bv[32], el[32], rv[32];
@@ -687,6 +803,8 @@ static void usage(FILE *to)
 "  local dir  -> s3://…      upload\n"
 "  s3://…     -> local dir   download\n"
 "  s3://…     -> s3://…      server-side copy (same endpoint)\n"
+"  local dir  -> local dir   parallel local mirror (atomic copies,\n"
+"                            source mtimes preserved)\n"
 "\n"
 "By default this is a DRY RUN: the plan is printed as CSV and nothing\n"
 "is changed. Add --apply to synchronise.\n"
@@ -837,23 +955,53 @@ int main(int argc, char **argv)
         g.mode = M_UPLOAD;
     else if (src.is_s3 && !dst.is_s3)
         g.mode = M_DOWNLOAD;
-    else {
-        fprintf(stderr, "s3m-sync: at least one side must be an s3:// "
-                "URI (use p3m-cp for local copies)\n");
-        return 2;
-    }
+    else
+        g.mode = M_LOCAL;
     if (g.size_only && g.checksum) {
         fprintf(stderr, "s3m-sync: --size-only and --checksum are "
                 "mutually exclusive\n");
         return 2;
     }
-    if (g.mode == M_UPLOAD || g.mode == M_DOWNLOAD) {
+    if (g.mode == M_UPLOAD || g.mode == M_LOCAL) {
         struct stat st;
-        const char *d = g.mode == M_UPLOAD ? src.dir : dst.dir;
-        if (g.mode == M_UPLOAD &&
-            (stat(d, &st) != 0 || !S_ISDIR(st.st_mode))) {
-            fprintf(stderr, "s3m-sync: '%s' is not a directory\n", d);
+        if (stat(src.dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "s3m-sync: '%s' is not a directory\n",
+                    src.dir);
             return 2;
+        }
+    }
+    if (g.mode == M_LOCAL) {
+        /* refuse syncing a directory into itself or its own subtree —
+         * resolved before any work starts, symlinks and all. A
+         * destination that does not exist yet is judged by its deepest
+         * existing ancestor (it would be created inside that). */
+        char rs[PATH_MAX], rd[PATH_MAX] = "";
+        if (realpath(src.dir, rs)) {
+            char probe[PATH_MAX];
+            snprintf(probe, sizeof probe, "%s", dst.dir);
+            while (!realpath(probe, rd)) {
+                rd[0] = '\0';
+                char *sl = strrchr(probe, '/');
+                if (!sl) {
+                    if (!realpath(".", rd))
+                        rd[0] = '\0';
+                    break;
+                }
+                *sl = '\0';
+                if (!probe[0]) {
+                    snprintf(probe, sizeof probe, "/");
+                    if (!realpath(probe, rd))
+                        rd[0] = '\0';
+                    break;
+                }
+            }
+            size_t rl = strlen(rs);
+            if (rd[0] && (!strcmp(rs, rd) ||
+                          (!strncmp(rd, rs, rl) && rd[rl] == '/'))) {
+                fprintf(stderr, "s3m-sync: refusing to sync '%s' into "
+                        "itself\n", src.dir);
+                return 2;
+            }
         }
     }
 
