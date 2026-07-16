@@ -3,31 +3,38 @@
  *
  * Part of s3m: Parallel S3 Object Manager
  *
- * Compares two buckets or prefixes and reports the likelihood that
- * their contents are the same. By default it compares key presence,
- * sizes, and etags where etags are conclusive (single-part uploads are
- * content MD5s); with -c it additionally verifies contents with ranged
- * GETs, stopping at the first differing byte. Read-only: nothing on
- * either side is ever modified.
+ * Compares two buckets/prefixes, or a local directory against a
+ * bucket/prefix, and reports the likelihood that their contents are
+ * the same. By default it compares key presence, sizes, and etags
+ * where etags are conclusive (single-part uploads are content MD5s);
+ * with -c it additionally verifies contents — a local MD5 against a
+ * conclusive etag where possible (no network I/O), ranged GETs
+ * otherwise, stopping at the first differing byte. Read-only: nothing
+ * on either side is ever modified.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include "s3mcore.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#define S3M_DIFF_VERSION "1.0.0"
+#define S3M_DIFF_VERSION "1.1.0"
 
-#define CHUNK ((uint64_t)8 << 20)      /* ranged-GET compare chunk */
+#define CHUNK ((uint64_t)8 << 20)      /* content compare chunk */
 
 struct side {
+    bool  is_s3;
     char  bucket[256];
-    char *prefix;              /* "" or ends with '/' */
+    char *prefix;              /* s3: "" or ends with '/' */
+    char *dir;                 /* local: no trailing '/'  */
 };
 
 static struct side L, R;
@@ -144,6 +151,7 @@ static void emit_diff(s3m_outbuf *ob, const char *rel, const char *what,
 struct cand {
     char    *rel;
     uint64_t size;
+    char     etag[68];         /* the S3 side's etag (mixed runs) */
 };
 
 static struct cand    *cands;
@@ -151,7 +159,7 @@ static size_t          ncands, ccands;
 static pthread_mutex_t cands_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic size_t  next_cand;
 
-static void cand_add(const char *rel, uint64_t size)
+static void cand_add(const char *rel, uint64_t size, const char *etag)
 {
     pthread_mutex_lock(&cands_mu);
     if (ncands == ccands) {
@@ -167,6 +175,8 @@ static void cand_add(const char *rel, uint64_t size)
     }
     cands[ncands].rel = strdup(rel);
     cands[ncands].size = size;
+    snprintf(cands[ncands].etag, sizeof cands[ncands].etag, "%s",
+             etag ? etag : "");
     if (cands[ncands].rel)
         ncands++;
     pthread_mutex_unlock(&cands_mu);
@@ -199,6 +209,46 @@ static void on_left_obj(void *ctx, const s3m_obj *o)
     idx_add(rel, o->size, o->etag);
 }
 
+/* compare one right-side entry against the left index; etag is ""
+ * for local entries */
+static void compare_entry(struct wctx *w, const char *rel,
+                          uint64_t size, const char *etag)
+{
+    atomic_fetch_add_explicit(&n_right, 1, memory_order_relaxed);
+    s3m_set_current(rel);
+
+    struct dent *d = idx_find(rel);
+    if (!d) {
+        char rs[32];
+        snprintf(rs, sizeof rs, "%llu", (unsigned long long)size);
+        atomic_fetch_add_explicit(&d_onlyr, 1, memory_order_relaxed);
+        emit_diff(&w->ob, rel, "only-right", "", rs);
+        return;
+    }
+    d->seen = true;                    /* keys are unique per side */
+
+    if (d->size != size) {
+        char ls[32], rs[32];
+        snprintf(ls, sizeof ls, "%llu", (unsigned long long)d->size);
+        snprintf(rs, sizeof rs, "%llu", (unsigned long long)size);
+        atomic_fetch_add_explicit(&d_size, 1, memory_order_relaxed);
+        emit_diff(&w->ob, rel, "size", ls, rs);
+        return;
+    }
+    if (etag_conclusive(d->etag) && etag_conclusive(etag)) {
+        if (strcasecmp(d->etag, etag) != 0) {
+            atomic_fetch_add_explicit(&d_etag, 1, memory_order_relaxed);
+            emit_diff(&w->ob, rel, "etag", d->etag, etag);
+        }
+        return;                        /* conclusive either way */
+    }
+    /* sizes equal, comparison inconclusive so far */
+    if (g.checksum && size > 0)
+        cand_add(rel, size, etag[0] ? etag : d->etag);
+    else if (size > 0)
+        atomic_fetch_add_explicit(&n_unverified, 1, memory_order_relaxed);
+}
+
 static void on_right_obj(void *ctx, const s3m_obj *o)
 {
     struct wctx *w = ctx;
@@ -208,40 +258,45 @@ static void on_right_obj(void *ctx, const s3m_obj *o)
     const char *rel = o->key + plen;
     if (!rel[0] || rel[strlen(rel) - 1] == '/')
         return;
+    compare_entry(w, rel, o->size, o->etag);
+}
 
-    atomic_fetch_add_explicit(&n_right, 1, memory_order_relaxed);
-    s3m_set_current(o->key);
-
-    struct dent *d = idx_find(rel);
+/* recursive local walk (regular files only, symlinks never followed);
+ * indexes the left side or compares as the right side */
+static void walk_local(struct wctx *w, const char *root, size_t rootlen,
+                       bool indexing)
+{
+    DIR *d = opendir(root);
     if (!d) {
-        char rs[32];
-        snprintf(rs, sizeof rs, "%llu", (unsigned long long)o->size);
-        atomic_fetch_add_explicit(&d_onlyr, 1, memory_order_relaxed);
-        emit_diff(&w->ob, rel, "only-right", "", rs);
+        s3m_note_error(root, "opendir", strerror(errno));
         return;
     }
-    d->seen = true;                    /* keys are unique per side */
-
-    if (d->size != o->size) {
-        char ls[32], rs[32];
-        snprintf(ls, sizeof ls, "%llu", (unsigned long long)d->size);
-        snprintf(rs, sizeof rs, "%llu", (unsigned long long)o->size);
-        atomic_fetch_add_explicit(&d_size, 1, memory_order_relaxed);
-        emit_diff(&w->ob, rel, "size", ls, rs);
-        return;
-    }
-    if (etag_conclusive(d->etag) && etag_conclusive(o->etag)) {
-        if (strcasecmp(d->etag, o->etag) != 0) {
-            atomic_fetch_add_explicit(&d_etag, 1, memory_order_relaxed);
-            emit_diff(&w->ob, rel, "etag", d->etag, o->etag);
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *nm = de->d_name;
+        if (nm[0] == '.' &&
+            (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')))
+            continue;
+        char *fp = s3m_strdupf("%s/%s", root, nm);
+        if (!fp)
+            continue;
+        struct stat st;
+        if (lstat(fp, &st) != 0) {
+            s3m_note_error(fp, "stat", strerror(errno));
+        } else if (S_ISDIR(st.st_mode)) {
+            walk_local(w, fp, rootlen, indexing);
+        } else if (S_ISREG(st.st_mode)) {
+            const char *rel = fp + rootlen + 1;
+            if (indexing) {
+                s3m_set_current(rel);
+                idx_add(rel, (uint64_t)st.st_size, "");
+            } else {
+                compare_entry(w, rel, (uint64_t)st.st_size, "");
+            }
         }
-        return;                        /* conclusive either way */
+        free(fp);
     }
-    /* sizes equal, etags inconclusive */
-    if (g.checksum && o->size > 0)
-        cand_add(rel, o->size);
-    else if (o->size > 0)
-        atomic_fetch_add_explicit(&n_unverified, 1, memory_order_relaxed);
+    closedir(d);
 }
 
 static void *list_worker(void *arg)
@@ -292,14 +347,50 @@ static int get_range(s3m_http *h, const char *bucket, const char *key,
     return 0;
 }
 
+/* fetch one chunk of a side: ranged GET (body borrowed from *r) or
+ * pread into buf; returns false and notes the error on failure */
+static bool side_chunk(s3m_http *h, const struct side *s,
+                       const char *rel, int fd, char *buf,
+                       uint64_t off, uint64_t len, s3m_resp *r,
+                       const char **out, size_t *outn,
+                       const char *what)
+{
+    if (s->is_s3) {
+        char key[2200];
+        snprintf(key, sizeof key, "%s%s", s->prefix, rel);
+        if (get_range(h, s->bucket, key, off, len, r) != 0) {
+            char es[256];
+            s3m_resp_errstr(r, es, sizeof es);
+            s3m_note_error(key, what, es);
+            return false;
+        }
+        *out = r->body;
+        *outn = r->body_len;
+        return true;
+    }
+    ssize_t n = pread(fd, buf, (size_t)len, (off_t)off);
+    if (n < 0) {
+        s3m_note_error(rel, what, strerror(errno));
+        return false;
+    }
+    *out = buf;
+    *outn = (size_t)n;
+    return true;
+}
+
 static void *verify_worker(void *arg)
 {
     (void)arg;
     struct wctx w;
     w.h = s3m_http_new();
-    if (!w.h || s3m_ob_init(&w.ob, &sink) != 0) {
+    char *lbuf = L.is_s3 ? NULL : malloc(CHUNK);
+    char *rbuf = R.is_s3 ? NULL : malloc(CHUNK);
+    if (!w.h || s3m_ob_init(&w.ob, &sink) != 0 ||
+        (!L.is_s3 && !lbuf) || (!R.is_s3 && !rbuf)) {
         s3m_note_error("worker", "startup", "out of memory");
         s3m_http_free(w.h);
+        free(lbuf);
+        free(rbuf);
         return NULL;
     }
     for (;;) {
@@ -307,54 +398,91 @@ static void *verify_worker(void *arg)
         if (i >= ncands)
             break;
         struct cand *cd = &cands[i];
-        char lkey[2200], rkey[2200];
-        snprintf(lkey, sizeof lkey, "%s%s", L.prefix, cd->rel);
-        snprintf(rkey, sizeof rkey, "%s%s", R.prefix, cd->rel);
         s3m_set_current(cd->rel);
 
-        bool differ = false, failed = false;
+        /* mixed run with a conclusive S3 etag: one local MD5 pass is
+         * full content verification with no network I/O at all */
+        if (L.is_s3 != R.is_s3 && etag_conclusive(cd->etag)) {
+            const struct side *ls = L.is_s3 ? &R : &L;
+            char *path = s3m_strdupf("%s/%s", ls->dir, cd->rel);
+            char md5[33];
+            if (!path || s3m_file_md5(path, md5) != 0) {
+                s3m_note_error(cd->rel, "read-local",
+                               path ? strerror(errno) : "out of memory");
+            } else {
+                atomic_fetch_add_explicit(&bytes_checked, cd->size,
+                                          memory_order_relaxed);
+                if (strcasecmp(md5, cd->etag) != 0) {
+                    atomic_fetch_add_explicit(&d_content, 1,
+                                              memory_order_relaxed);
+                    emit_diff(&w.ob, cd->rel, "content",
+                              "md5 differs from etag", "");
+                }
+            }
+            free(path);
+            continue;
+        }
+
+        /* chunked compare; each side is a ranged GET or a pread */
+        int lfd = -1, rfd = -1;
+        bool failed = false;
+        if (!L.is_s3) {
+            char *p = s3m_strdupf("%s/%s", L.dir, cd->rel);
+            if (!p || (lfd = open(p, O_RDONLY | O_CLOEXEC)) < 0) {
+                s3m_note_error(cd->rel, "read-left",
+                               p ? strerror(errno) : "out of memory");
+                failed = true;
+            }
+            free(p);
+        }
+        if (!R.is_s3 && !failed) {
+            char *p = s3m_strdupf("%s/%s", R.dir, cd->rel);
+            if (!p || (rfd = open(p, O_RDONLY | O_CLOEXEC)) < 0) {
+                s3m_note_error(cd->rel, "read-right",
+                               p ? strerror(errno) : "out of memory");
+                failed = true;
+            }
+            free(p);
+        }
+
+        bool differ = false;
         uint64_t diff_at = 0;
         for (uint64_t off = 0; off < cd->size && !differ && !failed;
              off += CHUNK) {
             uint64_t len = (off + CHUNK <= cd->size) ? CHUNK
                                                      : cd->size - off;
-            s3m_resp lr, rr;
-            if (get_range(w.h, L.bucket, lkey, off, len, &lr) != 0) {
-                char es[256];
-                s3m_resp_errstr(&lr, es, sizeof es);
-                s3m_note_error(lkey, "read-left", es);
+            s3m_resp lr = { 0 }, rr = { 0 };
+            const char *lb = NULL, *rb = NULL;
+            size_t ln = 0, rn = 0;
+            if (!side_chunk(w.h, &L, cd->rel, lfd, lbuf, off, len, &lr,
+                            &lb, &ln, "read-left") ||
+                !side_chunk(w.h, &R, cd->rel, rfd, rbuf, off, len, &rr,
+                            &rb, &rn, "read-right")) {
                 failed = true;
-                s3m_resp_free(&lr);
-                continue;
-            }
-            if (get_range(w.h, R.bucket, rkey, off, len, &rr) != 0) {
-                char es[256];
-                s3m_resp_errstr(&rr, es, sizeof es);
-                s3m_note_error(rkey, "read-right", es);
-                failed = true;
-                s3m_resp_free(&lr);
-                s3m_resp_free(&rr);
-                continue;
-            }
-            size_t n = lr.body_len < rr.body_len ? lr.body_len
-                                                 : rr.body_len;
-            if (lr.body_len != rr.body_len) {
-                /* short read on one side: sizes changed mid-run */
-                differ = true;
-                diff_at = off + n;
-            }
-            for (size_t b = 0; b < n; b++) {
-                if (lr.body[b] != rr.body[b]) {
+            } else {
+                size_t n = ln < rn ? ln : rn;
+                if (ln != rn) {
+                    /* short read on one side: it changed mid-run */
                     differ = true;
-                    diff_at = off + b;
-                    break;
+                    diff_at = off + n;
                 }
+                for (size_t b = 0; b < n; b++) {
+                    if (lb[b] != rb[b]) {
+                        differ = true;
+                        diff_at = off + b;
+                        break;
+                    }
+                }
+                atomic_fetch_add_explicit(&bytes_checked, ln + rn,
+                                          memory_order_relaxed);
             }
-            atomic_fetch_add_explicit(&bytes_checked, 2 * n,
-                                      memory_order_relaxed);
             s3m_resp_free(&lr);
             s3m_resp_free(&rr);
         }
+        if (lfd >= 0)
+            close(lfd);
+        if (rfd >= 0)
+            close(rfd);
         if (differ) {
             char at[48];
             snprintf(at, sizeof at, "differ at byte %llu",
@@ -364,6 +492,8 @@ static void *verify_worker(void *arg)
             emit_diff(&w.ob, cd->rel, "content", at, "");
         }
     }
+    free(lbuf);
+    free(rbuf);
     s3m_ob_flush(&w.ob);
     s3m_ob_free(&w.ob);
     s3m_http_free(w.h);
@@ -519,22 +649,21 @@ static void print_summary(double elapsed)
         return;
     }
     if (dfs) {
-        fprintf(stderr, "  prefixes differ — %s difference%s listed "
+        fprintf(stderr, "  sides differ — %s difference%s listed "
                 "above\n", dv, dfs == 1 ? " is" : "s are");
         return;
     }
     if (g.checksum || uv == 0) {
-        fprintf(stderr, "  prefixes are identical — keys, sizes and "
+        fprintf(stderr, "  sides are identical — keys, sizes and "
                 "contents all match%s\n",
                 g.checksum ? " (contents verified)"
                            : " (every etag was conclusive)");
     } else {
         char u[32];
         s3m_fmt_u64(uv, u);
-        fprintf(stderr, "  prefixes are very likely identical — keys, "
-                "sizes and comparable etags all match (%s multipart "
-                "etag%s not comparable — add -c to verify contents)\n",
-                u, uv == 1 ? "" : "s");
+        fprintf(stderr, "  sides are very likely identical — keys, "
+                "sizes and comparable etags all match (%s pair%s not "
+                "content-verified — add -c)\n", u, uv == 1 ? "" : "s");
     }
 }
 
@@ -545,24 +674,26 @@ static void print_summary(double elapsed)
 static void usage(FILE *to)
 {
     fputs(
-"Usage: s3m-diff [OPTIONS] s3://LEFT[/PREFIX] s3://RIGHT[/PREFIX]\n"
+"Usage: s3m-diff [OPTIONS] LEFT RIGHT\n"
 "\n"
-"Compare two buckets or prefixes in parallel and report every\n"
-"difference as CSV, ending with a summary and a plain-language\n"
-"verdict. Read-only. Exit status is diff-like: 0 no differences,\n"
+"Compare two sides in parallel and report every difference as CSV,\n"
+"ending with a summary and a plain-language verdict. Each side is an\n"
+"s3://BUCKET[/PREFIX] URI or a local directory (both local: use\n"
+"p3m-diff). Read-only. Exit status is diff-like: 0 no differences,\n"
 "1 differences found, 2 usage error or the comparison hit errors\n"
 "(the verdict is withheld — coverage was incomplete).\n"
 "\n"
 "By default keys, sizes, and conclusive etags (single-part uploads\n"
-"are content MD5s) are compared. Multipart etags are not comparable;\n"
-"-c verifies those objects' contents directly.\n"
+"are content MD5s) are compared; local files have no etag, so a\n"
+"local-vs-S3 run compares keys and sizes. -c verifies contents.\n"
 "\n"
 "Options:\n"
-"  -c, --checksum       verify contents where etags are inconclusive,\n"
-"                       with ranged GETs in 8 MiB chunks; the read\n"
-"                       stops at the first differing byte. Sizes gate\n"
-"                       everything: size-mismatched objects are never\n"
-"                       read.\n"
+"  -c, --checksum       verify contents where the cheap checks are\n"
+"                       inconclusive: local MD5 against a conclusive\n"
+"                       etag where possible (no network I/O), else\n"
+"                       chunked reads/ranged GETs stopping at the\n"
+"                       first differing byte. Sizes gate everything:\n"
+"                       size-mismatched objects are never read.\n"
 "  -j, --threads N      worker threads, 1-256 (default: 16)\n"
 "      --shard-depth N  prefix levels to expand for parallelism, 0-9\n"
 "                       (default: 2)\n"
@@ -644,27 +775,47 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    char *lk, *rk;
-    if (s3m_uri_parse("s3m-diff", argv[optind], L.bucket, &lk) != 0 ||
-        s3m_uri_parse("s3m-diff", argv[optind + 1], R.bucket, &rk) != 0)
+    for (int i = 0; i < 2; i++) {
+        struct side *s = i ? &R : &L;
+        const char *arg = argv[optind + i];
+        s->is_s3 = !strncasecmp(arg, "s3://", 5);
+        if (s->is_s3) {
+            char *k;
+            if (s3m_uri_parse("s3m-diff", arg, s->bucket, &k) != 0)
+                return 2;
+            if (k[0] && k[strlen(k) - 1] != '/') {
+                char *n = s3m_strdupf("%s/", k);  /* directory-like */
+                free(k);
+                k = n;
+            }
+            if (!k) {
+                fprintf(stderr, "s3m-diff: out of memory\n");
+                return 2;
+            }
+            s->prefix = k;
+        } else {
+            char *d = strdup(arg);
+            if (!d) {
+                fprintf(stderr, "s3m-diff: out of memory\n");
+                return 2;
+            }
+            size_t l = strlen(d);
+            while (l > 1 && d[l - 1] == '/')
+                d[--l] = '\0';
+            struct stat st;
+            if (stat(d, &st) != 0 || !S_ISDIR(st.st_mode)) {
+                fprintf(stderr, "s3m-diff: '%s' is not a directory\n",
+                        arg);
+                return 2;
+            }
+            s->dir = d;
+        }
+    }
+    if (!L.is_s3 && !R.is_s3) {
+        fprintf(stderr, "s3m-diff: both sides are local — use p3m-diff "
+                "for local trees\n");
         return 2;
-    /* prefixes are directory-like */
-    if (lk[0] && lk[strlen(lk) - 1] != '/') {
-        char *n = s3m_strdupf("%s/", lk);
-        free(lk);
-        lk = n;
     }
-    if (rk && rk[0] && rk[strlen(rk) - 1] != '/') {
-        char *n = s3m_strdupf("%s/", rk);
-        free(rk);
-        rk = n;
-    }
-    if (!lk || !rk) {
-        fprintf(stderr, "s3m-diff: out of memory\n");
-        return 2;
-    }
-    L.prefix = lk;
-    R.prefix = rk;
 
     s3m_color = isatty(STDERR_FILENO);
     g.suppress = g.quiet && !g.outpath;
@@ -708,25 +859,43 @@ int main(int argc, char **argv)
             g.progress = false;
     }
 
-    /* ---- phase 1: index left ---- */
-    atomic_store(&cur_phase, 1);
-    s3m_stack_init(&stk, g.nthreads);
-    s3m_push_job(&stk, L.bucket, L.prefix, 0, 0);
-    if (run_pool(list_worker, (void *)1) != 0) {
-        fprintf(stderr, "s3m-diff: could not start worker threads\n");
+    /* local sides are walked on the main thread */
+    struct wctx mw;
+    mw.h = NULL;
+    if (s3m_ob_init(&mw.ob, &sink) != 0) {
+        fprintf(stderr, "s3m-diff: out of memory\n");
         return 2;
     }
-    s3m_stack_destroy(&stk);
+
+    /* ---- phase 1: index left ---- */
+    atomic_store(&cur_phase, 1);
+    if (L.is_s3) {
+        s3m_stack_init(&stk, g.nthreads);
+        s3m_push_job(&stk, L.bucket, L.prefix, 0, 0);
+        if (run_pool(list_worker, (void *)1) != 0) {
+            fprintf(stderr, "s3m-diff: could not start worker threads\n");
+            return 2;
+        }
+        s3m_stack_destroy(&stk);
+    } else {
+        walk_local(&mw, L.dir, strlen(L.dir), true);
+    }
 
     /* ---- phase 2: scan right, comparing ---- */
     atomic_store(&cur_phase, 2);
-    s3m_stack_init(&stk, g.nthreads);
-    s3m_push_job(&stk, R.bucket, R.prefix, 0, 0);
-    if (run_pool(list_worker, NULL) != 0) {
-        fprintf(stderr, "s3m-diff: could not start worker threads\n");
-        return 2;
+    if (R.is_s3) {
+        s3m_stack_init(&stk, g.nthreads);
+        s3m_push_job(&stk, R.bucket, R.prefix, 0, 0);
+        if (run_pool(list_worker, NULL) != 0) {
+            fprintf(stderr, "s3m-diff: could not start worker threads\n");
+            return 2;
+        }
+        s3m_stack_destroy(&stk);
+    } else {
+        walk_local(&mw, R.dir, strlen(R.dir), false);
     }
-    s3m_stack_destroy(&stk);
+    s3m_ob_flush(&mw.ob);
+    s3m_ob_free(&mw.ob);
 
     /* left entries the right side never matched */
     {

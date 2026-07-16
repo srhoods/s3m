@@ -1,21 +1,25 @@
-# s3m-diff — parallel bucket/prefix comparison
+# s3m-diff — parallel comparison (buckets, prefixes, local trees)
 
-`s3m-diff` compares two buckets or prefixes and reports the likelihood
-that their contents are the same. By default it compares **key
-presence**, **sizes**, and **etags where etags are conclusive** — a
-single-part upload's etag is its content MD5, so most objects get real
-content comparison for free. With `-c` it additionally verifies the
-inconclusive objects' **contents** with ranged GETs. Every difference
-is listed as CSV and the run ends with a summary and a plain-language
-verdict.
+`s3m-diff` compares two sides — two buckets/prefixes, or a **local
+directory against a bucket/prefix** — and reports the likelihood that
+their contents are the same. By default it compares **key presence**,
+**sizes**, and **etags where etags are conclusive** — a single-part
+upload's etag is its content MD5, so most S3↔S3 pairs get real content
+comparison for free. With `-c` it additionally verifies **contents**.
+Every difference is listed as CSV and the run ends with a summary and
+a plain-language verdict.
 
 The tool is read-only: nothing on either side is ever modified.
 
 ## Synopsis
 
 ```
-s3m-diff [OPTIONS] s3://LEFT[/PREFIX] s3://RIGHT[/PREFIX]
+s3m-diff [OPTIONS] LEFT RIGHT
 ```
+
+Each side is an `s3://BUCKET[/PREFIX]` URI or a local directory. Two
+local directories are refused — that's
+[p3m-diff](../../p3m/docs/p3m-diff.md)'s job.
 
 Exit status is diff-like: `0` no differences · `1` differences found ·
 `2` usage error, or the comparison hit errors (the verdict is withheld
@@ -26,7 +30,7 @@ misleading).
 
 | Option | Description |
 |--------|-------------|
-| `-c, --checksum` | Verify contents where etags are inconclusive. Objects are read from both sides in 8 MiB ranged GETs and compared byte-for-byte; the read **stops at the first differing byte** and the listing reports that offset. Sizes gate everything: size-mismatched objects are never read. |
+| `-c, --checksum` | Verify contents where the cheap checks are inconclusive. In a local-vs-S3 run, a file whose object has a conclusive etag is verified by **hashing the local file — no network I/O at all**; every other pair is compared byte-for-byte in 8 MiB chunks (local reads / ranged GETs), **stopping at the first differing byte** and reporting that offset. Sizes gate everything: size-mismatched objects are never read. |
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallel listing, 0–9 (default 2). |
 | `-o, --output FILE` | Write the CSV listing to `FILE` and show a live progress display. |
@@ -42,12 +46,14 @@ shared by all s3m tools — see [connection.md](connection.md).
 |-------|------|
 | key presence | always — `only-left` / `only-right` rows |
 | size | always — a size mismatch stops further comparison of that key |
-| etag | when **both** sides' etags are conclusive (no `-`, i.e. single-part uploads: the etag is the content MD5) |
-| content | with `-c`, for keys whose sizes match but whose etags are inconclusive (multipart uploads, SSE variants) |
+| etag | when **both** sides' etags are conclusive (no `-`, i.e. single-part uploads: the etag is the content MD5) — never in local-vs-S3 runs, since files have no etag |
+| content | with `-c`, for pairs whose sizes match but that no cheaper check settled: local MD5 vs a conclusive etag where possible, chunked byte comparison otherwise |
 
 Timestamps are deliberately **not** compared: an object's LastModified
 is its upload time, so two perfect copies always differ there.
 Storage class is metadata, not content, and is also not compared.
+Local sides walk regular files only; symbolic links are never
+followed.
 
 ## Output
 
@@ -59,7 +65,7 @@ prefixes:
 | `only-left`, `only-right` | key exists on one side only | size / empty (or vice versa) |
 | `size` | sizes differ | the two sizes in bytes |
 | `etag` | conclusive etags differ (content proven different) | the two etags |
-| `content` | contents differ (`-c`) | first differing byte offset / empty |
+| `content` | contents differ (`-c`) | first differing byte offset, or `md5 differs from etag` / empty |
 
 ## Summary and verdict
 
@@ -103,6 +109,15 @@ s3m-diff -c -o drift.csv s3://prod/config/ s3://backup/config/
 # Audit an s3m-cp copy
 s3m-cp --apply s3://a/data/ s3://b/data/ && s3m-diff -cq s3://a/data/ s3://b/data/
 
+# Does my disk backup still match the bucket? (keys + sizes, instant)
+s3m-diff -q ./backup s3://prod/data/
+
+# …and byte-for-byte (local MD5 against etags where possible)
+s3m-diff -c -q ./backup s3://prod/data/
+
+# Verify a download/upload before deleting the other side
+s3m-sync --apply s3://b/reports ./reports && s3m-diff -cq ./reports s3://b/reports/
+
 # Compare across services (same credentials/endpoint required per run —
 # for cross-endpoint comparison, s3m-ls both sides and diff the CSVs)
 s3m-ls -m standard s3://b1 | sort > left.csv
@@ -124,7 +139,10 @@ diff left.csv right.csv
 
 ## Behaviour notes
 
-- Both sides must be reachable with the same endpoint and credentials.
+- S3 sides must be reachable with the same endpoint and credentials.
+- In a local-vs-S3 run without `-c`, equal-size pairs are not
+  content-checked at all (files have no etag) — the verdict says how
+  many pairs that covers.
 - Keys are compared relative to the given prefixes; "directory
   placeholder" objects (keys ending `/`) are ignored.
 - Comparing a prefix with itself reports identical (and is harmless).

@@ -1613,6 +1613,39 @@ const char *s3m_mime_type(const char *name)
     return "application/octet-stream";
 }
 
+int s3m_file_md5(const char *path, char out[33])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        close(fd);
+        return -1;
+    }
+    EVP_DigestInit_ex(ctx, EVP_md5(), NULL);
+    char buf[1 << 16];
+    ssize_t r;
+    while ((r = read(fd, buf, sizeof buf)) > 0)
+        EVP_DigestUpdate(ctx, buf, (size_t)r);
+    close(fd);
+    if (r < 0) {
+        EVP_MD_CTX_free(ctx);
+        return -1;
+    }
+    unsigned char md[16];
+    unsigned int l = 16;
+    EVP_DigestFinal_ex(ctx, md, &l);
+    EVP_MD_CTX_free(ctx);
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[i * 2]     = hx[md[i] >> 4];
+        out[i * 2 + 1] = hx[md[i] & 15];
+    }
+    out[32] = '\0';
+    return 0;
+}
+
 int s3m_mkdirs_for(const char *path)
 {
     char tmp[4096];

@@ -241,6 +241,8 @@ int s3m_copy_object(s3m_http *h, const char *src_bucket,
 
 /* Content-Type guess from the file extension */
 const char *s3m_mime_type(const char *name);
+/* hex MD5 of a local file (for etag comparison); 0 ok, -1 I/O error */
+int s3m_file_md5(const char *path, char out[33]);
 /* create every missing parent directory of path; 0 ok */
 int s3m_mkdirs_for(const char *path);
 /* PUT a local file, streaming; multipart above 128 MiB (aborted

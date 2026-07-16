@@ -29,7 +29,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <openssl/evp.h>     /* local MD5 for --checksum               */
 
 #define S3M_SYNC_VERSION "1.1.0"
 
@@ -215,43 +214,6 @@ static void emit_row(s3m_outbuf *ob, const char *rel, const char *action,
 }
 
 /* ------------------------------------------------------------------ */
-/* local file MD5 (--checksum)                                          */
-/* ------------------------------------------------------------------ */
-
-static int file_md5_hex(const char *path, char out[33])
-{
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return -1;
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (!ctx) {
-        close(fd);
-        return -1;
-    }
-    EVP_DigestInit_ex(ctx, EVP_md5(), NULL);
-    char buf[1 << 16];
-    ssize_t r;
-    while ((r = read(fd, buf, sizeof buf)) > 0)
-        EVP_DigestUpdate(ctx, buf, (size_t)r);
-    close(fd);
-    if (r < 0) {
-        EVP_MD_CTX_free(ctx);
-        return -1;
-    }
-    unsigned char md[16];
-    unsigned int l = 16;
-    EVP_DigestFinal_ex(ctx, md, &l);
-    EVP_MD_CTX_free(ctx);
-    static const char hx[] = "0123456789abcdef";
-    for (int i = 0; i < 16; i++) {
-        out[i * 2]     = hx[md[i] >> 4];
-        out[i * 2 + 1] = hx[md[i] & 15];
-    }
-    out[32] = '\0';
-    return 0;
-}
-
-/* ------------------------------------------------------------------ */
 /* diff: does this source entry need copying?                           */
 /* ------------------------------------------------------------------ */
 
@@ -279,11 +241,11 @@ static void diff_entry(const char *rel, uint64_t size, time_t mtime,
         char *dlpath = (g.mode == M_DOWNLOAD)
                      ? s3m_strdupf("%s/%s", dst.dir, rel) : NULL;
         if (g.mode == M_UPLOAD && !strchr(d->etag, '-') && d->etag[0] &&
-            file_md5_hex(local_path, md5) == 0)
+            s3m_file_md5(local_path, md5) == 0)
             copy = strcasecmp(md5, d->etag) != 0;
         else if (g.mode == M_DOWNLOAD && src_etag && src_etag[0] &&
                  !strchr(src_etag, '-') && dlpath &&
-                 file_md5_hex(dlpath, md5) == 0)
+                 s3m_file_md5(dlpath, md5) == 0)
             copy = strcasecmp(md5, src_etag) != 0;
         else if (g.mode == M_REMOTE && src_etag && src_etag[0] &&
                  d->etag[0])
