@@ -83,10 +83,10 @@ non-deterministic in apply mode.
   (`name.s3m-tmp-XXXXXX`) and are renamed into place — readers never
   see a half-written file — with mtime set to the object's
   LastModified. Missing directories are created.
-- S3→S3 copies are server-side (`CopyObject`): no data flows through
-  the client. Objects over 5 GiB exceed the single-request copy limit
-  and are reported as errors. Both buckets must be on the same
-  endpoint/credentials.
+- S3→S3 copies are server-side: no data flows through the client.
+  Objects over 5 GiB (the single-request `CopyObject` limit) are copied
+  with multipart `UploadPartCopy` in 1 GiB parts, aborted server-side
+  on failure. Both buckets must be on the same endpoint/credentials.
 - Symbolic links are never followed or synced; special files are
   skipped.
 

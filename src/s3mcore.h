@@ -226,6 +226,14 @@ int s3m_req_download(s3m_http *h, const char *bucket, const char *key,
                      const char *query, int fd, _Atomic uint64_t *ctr,
                      s3m_resp *r);
 
+/* server-side copy: plain CopyObject up to 5 GiB, multipart
+ * UploadPartCopy above (aborted server-side on failure).  Adds bytes
+ * to *ctr as parts complete.  0 ok, -1 failed with a message in err. */
+int s3m_copy_object(s3m_http *h, const char *src_bucket,
+                    const char *src_key, const char *dst_bucket,
+                    const char *dst_key, uint64_t size,
+                    _Atomic uint64_t *ctr, char *err, size_t errsz);
+
 /* ---- minimal XML reader for S3 response documents --------------------- */
 
 enum { S3M_XML_OPEN, S3M_XML_ELEM, S3M_XML_CLOSE };

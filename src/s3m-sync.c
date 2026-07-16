@@ -643,25 +643,11 @@ static int do_copy(s3m_http *h, const struct action *a,
     } else {                          /* M_REMOTE: server-side copy */
         char *skey = s3m_strdupf("%s%s", src.prefix, a->rel);
         char *dkey = s3m_strdupf("%s%s", dst.prefix, a->rel);
-        char senc[3 * 1100];
-        s3m_urlenc(skey ? skey : "", true, senc, sizeof senc);
-        char *hdr = s3m_strdupf("x-amz-copy-source:/%s/%s", src.bucket,
-                                senc);
-        if (skey && dkey && hdr) {
-            const char *xh[1] = { hdr };
-            if (s3m_req(h, "PUT", dst.bucket, dkey, NULL, NULL, 0, NULL,
-                        false, xh, 1, &r) == 0 && r.status == 200 &&
-                !body_is_error(&r)) {
-                rc = 0;
-                atomic_fetch_add_explicit(&bytes_done, a->size,
-                                          memory_order_relaxed);
-            } else {
-                s3m_resp_errstr(&r, err, errsz);
-            }
-        }
+        if (skey && dkey)
+            rc = s3m_copy_object(h, src.bucket, skey, dst.bucket, dkey,
+                                 a->size, &bytes_done, err, errsz);
         free(skey);
         free(dkey);
-        free(hdr);
     }
     s3m_resp_free(&r);
     return rc;

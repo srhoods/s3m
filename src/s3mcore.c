@@ -1415,6 +1415,167 @@ int s3m_req_download(s3m_http *h, const char *bucket, const char *key,
 }
 
 /* ------------------------------------------------------------------ */
+/* server-side copy (CopyObject / UploadPartCopy)                       */
+/* ------------------------------------------------------------------ */
+
+#define COPY_PLAIN_MAX ((uint64_t)5 << 30)     /* CopyObject size limit */
+#define COPY_PARTSIZE  ((uint64_t)1 << 30)
+
+/* CopyObject and friends can return 200 with an <Error> body */
+static bool copy_body_error(const s3m_resp *r)
+{
+    return r->body && strstr(r->body, "<Error>") != NULL;
+}
+
+static void xml_find_elem(const char *body, size_t len, const char *tag,
+                          char *out, size_t outsz)
+{
+    out[0] = '\0';
+    s3m_xml x;
+    s3m_xml_init(&x, body, len);
+    while (s3m_xml_next(&x)) {
+        if (x.kind == S3M_XML_ELEM && !strcmp(x.tag, tag)) {
+            snprintf(out, outsz, "%s", x.text);
+            break;
+        }
+    }
+    s3m_xml_free(&x);
+}
+
+int s3m_copy_object(s3m_http *h, const char *src_bucket,
+                    const char *src_key, const char *dst_bucket,
+                    const char *dst_key, uint64_t size,
+                    _Atomic uint64_t *ctr, char *err, size_t errsz)
+{
+    char senc[3 * 1100];
+    s3m_urlenc(src_key, true, senc, sizeof senc);
+    char *cs_hdr = s3m_strdupf("x-amz-copy-source:/%s/%s", src_bucket,
+                               senc);
+    if (!cs_hdr) {
+        snprintf(err, errsz, "out of memory");
+        return -1;
+    }
+
+    s3m_resp r = { 0 };
+    int rc = -1;
+
+    if (size <= COPY_PLAIN_MAX) {
+        const char *xh[1] = { cs_hdr };
+        if (s3m_req(h, "PUT", dst_bucket, dst_key, NULL, NULL, 0, NULL,
+                    false, xh, 1, &r) == 0 && r.status == 200 &&
+            !copy_body_error(&r)) {
+            rc = 0;
+            if (ctr)
+                atomic_fetch_add_explicit(ctr, size,
+                                          memory_order_relaxed);
+        } else {
+            s3m_resp_errstr(&r, err, errsz);
+        }
+        s3m_resp_free(&r);
+        free(cs_hdr);
+        return rc;
+    }
+
+    /* multipart copy */
+    if (s3m_req(h, "POST", dst_bucket, dst_key, "uploads=", NULL, 0,
+                NULL, false, NULL, 0, &r) != 0 || r.status != 200) {
+        s3m_resp_errstr(&r, err, errsz);
+        s3m_resp_free(&r);
+        free(cs_hdr);
+        return -1;
+    }
+    char upid[300];
+    xml_find_elem(r.body, r.body_len, "UploadId", upid, sizeof upid);
+    s3m_resp_free(&r);
+    if (!upid[0]) {
+        snprintf(err, errsz, "no UploadId in initiate response");
+        free(cs_hdr);
+        return -1;
+    }
+    char upid_enc[900];
+    s3m_urlenc(upid, false, upid_enc, sizeof upid_enc);
+
+    uint64_t partsz = COPY_PARTSIZE;
+    while (size / partsz + 1 > 10000)
+        partsz *= 2;
+    size_t nparts = (size_t)((size + partsz - 1) / partsz);
+
+    char *etags = calloc(nparts, 68);
+    size_t done = 0;
+    if (etags) {
+        for (; done < nparts; done++) {
+            uint64_t off = (uint64_t)done * partsz;
+            uint64_t len = (off + partsz <= size) ? partsz : size - off;
+            char range_hdr[96], q[1024];
+            snprintf(range_hdr, sizeof range_hdr,
+                     "x-amz-copy-source-range:bytes=%llu-%llu",
+                     (unsigned long long)off,
+                     (unsigned long long)(off + len - 1));
+            snprintf(q, sizeof q, "partNumber=%zu&uploadId=%s",
+                     done + 1, upid_enc);
+            const char *xh[2] = { cs_hdr, range_hdr };
+            if (s3m_req(h, "PUT", dst_bucket, dst_key, q, NULL, 0, NULL,
+                        false, xh, 2, &r) != 0 || r.status != 200 ||
+                copy_body_error(&r)) {
+                s3m_resp_errstr(&r, err, errsz);
+                s3m_resp_free(&r);
+                break;
+            }
+            /* UploadPartCopy returns the part etag in the body */
+            xml_find_elem(r.body, r.body_len, "ETag", etags + done * 68,
+                          68);
+            s3m_resp_free(&r);
+            if (!etags[done * 68]) {
+                snprintf(err, errsz, "no ETag in CopyPartResult");
+                break;
+            }
+            if (ctr)
+                atomic_fetch_add_explicit(ctr, len, memory_order_relaxed);
+        }
+        if (done == nparts) {
+            size_t bl = 128 + nparts * 160;
+            char *body = malloc(bl);
+            if (body) {
+                size_t o = (size_t)snprintf(body, bl,
+                                            "<CompleteMultipartUpload>");
+                for (size_t j = 0; j < nparts; j++)
+                    o += (size_t)snprintf(body + o, bl - o,
+                        "<Part><PartNumber>%zu</PartNumber>"
+                        "<ETag>%s</ETag></Part>", j + 1, etags + j * 68);
+                o += (size_t)snprintf(body + o, bl - o,
+                                      "</CompleteMultipartUpload>");
+                char q[1024];
+                snprintf(q, sizeof q, "uploadId=%s", upid_enc);
+                if (s3m_req(h, "POST", dst_bucket, dst_key, q, body, o,
+                            "application/xml", false, NULL, 0, &r) == 0 &&
+                    r.status == 200 && !copy_body_error(&r))
+                    rc = 0;
+                else
+                    s3m_resp_errstr(&r, err, errsz);
+                s3m_resp_free(&r);
+                free(body);
+            } else {
+                snprintf(err, errsz, "out of memory");
+            }
+        }
+    } else {
+        snprintf(err, errsz, "out of memory");
+    }
+    free(etags);
+
+    if (rc != 0) {
+        s3m_resp ab;
+        char q[1024];
+        snprintf(q, sizeof q, "uploadId=%s", upid_enc);
+        s3m_req(h, "DELETE", dst_bucket, dst_key, q, NULL, 0, NULL,
+                false, NULL, 0, &ab);
+        s3m_resp_free(&ab);
+    }
+    free(cs_hdr);
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
 /* minimal XML reader                                                   */
 /* ------------------------------------------------------------------ */
 
