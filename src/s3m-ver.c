@@ -269,13 +269,13 @@ static void *worker(void *arg)
     char *job;
     while ((job = s3m_stack_pop(&stk)) != NULL) {
         char *bucket, *prefix;
-        int depth = s3m_job_parse(job, &bucket, &prefix);
+        int depth = s3m_job_parse(job, &bucket, &prefix, NULL);
         if (depth >= 0) {
             w.bucket = bucket;
             w.curkey[0] = '\0';
             s3m_delbatch_init(&w.batch, bucket, on_deleted, &w);
             s3m_list_job(w.h, &stk, bucket, prefix, depth, g.shard_depth,
-                         true, false, on_obj, &w);
+                         0, true, false, on_obj, &w);
             process_group(&w);            /* flush the final key group */
             s3m_delbatch_flush(&w.batch, w.h);
         }
@@ -629,7 +629,7 @@ int main(int argc, char **argv)
             covered = !strcmp(ubuckets[j], ubuckets[nuris]) &&
                       !strncmp(ukeys[j], ukeys[nuris], strlen(ukeys[j]));
         if (!covered)
-            s3m_push_job(&stk, ubuckets[nuris], ukeys[nuris], 0);
+            s3m_push_job(&stk, ubuckets[nuris], ukeys[nuris], 0, 0);
         nuris++;
     }
     for (int i = 0; i < nuris; i++)

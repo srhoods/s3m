@@ -351,10 +351,10 @@ static void *list_worker(void *arg)
     char *job;
     while ((job = s3m_stack_pop(&stk)) != NULL) {
         char *bucket, *prefix;
-        int depth = s3m_job_parse(job, &bucket, &prefix);
+        int depth = s3m_job_parse(job, &bucket, &prefix, NULL);
         if (depth >= 0)
             s3m_list_job(h, &stk, bucket, prefix, depth, g.shard_depth,
-                         false, false, cb, NULL);
+                         0, false, false, cb, NULL);
         free(job);
     }
     s3m_http_free(h);
@@ -365,7 +365,7 @@ static void *list_worker(void *arg)
 static int run_listing(struct side *s, s3m_obj_cb cb)
 {
     s3m_stack_init(&stk, g.nthreads);
-    s3m_push_job(&stk, s->bucket, s->prefix, 0);
+    s3m_push_job(&stk, s->bucket, s->prefix, 0, 0);
     pthread_t tids[256];
     int started = 0;
     for (int i = 0; i < g.nthreads; i++) {

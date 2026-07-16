@@ -79,12 +79,15 @@ char *s3m_stack_pop(s3m_stack *s);
 size_t s3m_stack_pending(s3m_stack *s);
 void  s3m_stack_destroy(s3m_stack *s);
 
-/* listing jobs are "<depth digit><bucket>\x01<prefix>" strings */
-char *s3m_job_make(const char *bucket, const char *prefix, int depth);
+/* listing jobs are "<depth digit><tag byte><bucket>\x01<prefix>"
+ * strings; the tag (0-63) is an arbitrary tool-defined label that
+ * sub-jobs inherit (e.g. which command-line target spawned the walk) */
+char *s3m_job_make(const char *bucket, const char *prefix, int depth,
+                   int tag);
 void  s3m_push_job(s3m_stack *s, const char *bucket, const char *prefix,
-                   int depth);
+                   int depth, int tag);
 /* splits a popped job in place; returns the depth, or -1 if malformed */
-int   s3m_job_parse(char *job, char **bucket, char **prefix);
+int   s3m_job_parse(char *job, char **bucket, char **prefix, int *tag);
 
 /* ---- buffered, thread-safe output ------------------------------------ */
 
@@ -276,7 +279,7 @@ typedef void (*s3m_obj_cb)(void *ctx, const s3m_obj *o);
  */
 int s3m_list_job(s3m_http *h, s3m_stack *stk, const char *bucket,
                  const char *prefix, int depth, int shard_depth,
-                 bool versions, bool fetch_owner,
+                 int tag, bool versions, bool fetch_owner,
                  s3m_obj_cb cb, void *ctx);
 
 /* ---- batched DeleteObjects pump ---------------------------------------- */

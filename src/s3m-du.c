@@ -205,14 +205,14 @@ static void *worker(void *arg)
     char *job;
     while ((job = s3m_stack_pop(&stk)) != NULL) {
         char *bucket, *prefix;
-        int depth = s3m_job_parse(job, &bucket, &prefix);
+        int depth = s3m_job_parse(job, &bucket, &prefix, NULL);
         if (depth >= 0) {
             int ri = root_for(bucket, prefix);
             w.bucket = bucket;
             w.root = roots[ri];
             w.root_keylen = root_keylens[ri];
             s3m_list_job(h, &stk, bucket, prefix, depth, g.shard_depth,
-                         g.versions, false, on_obj, &w);
+                         0, g.versions, false, on_obj, &w);
         }
         free(job);
     }
@@ -557,7 +557,7 @@ int main(int argc, char **argv)
         rootlens[nroots] = strlen(roots[nroots]);
         root_keylens[nroots] = strlen(key);
         nroots++;
-        s3m_push_job(&stk, bucket, key, 0);
+        s3m_push_job(&stk, bucket, key, 0, 0);
         free(key);
     }
 

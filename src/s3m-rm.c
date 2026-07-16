@@ -174,12 +174,12 @@ static void *worker(void *arg)
     char *job;
     while ((job = s3m_stack_pop(&stk)) != NULL) {
         char *bucket, *prefix;
-        int depth = s3m_job_parse(job, &bucket, &prefix);
+        int depth = s3m_job_parse(job, &bucket, &prefix, NULL);
         if (depth >= 0) {
             w.bucket = bucket;
             s3m_delbatch_init(&w.batch, bucket, on_deleted, &w);
             s3m_list_job(w.h, &stk, bucket, prefix, depth, g.shard_depth,
-                         g.permanent, false, on_obj, &w);
+                         0, g.permanent, false, on_obj, &w);
             s3m_delbatch_flush(&w.batch, w.h);
         }
         free(job);
@@ -499,7 +499,7 @@ int main(int argc, char **argv)
                                strlen(targets[j].root));
         }
         if (!covered)
-            s3m_push_job(&stk, targets[i].bucket, targets[i].root, 0);
+            s3m_push_job(&stk, targets[i].bucket, targets[i].root, 0, 0);
     }
 
     if (g.progress)

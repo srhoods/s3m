@@ -11,7 +11,7 @@ SRC     := src
 OBJ     := obj
 
 # Tools are added here as they are implemented
-TOOLS := $(BIN)/s3m-ls $(BIN)/s3m-du $(BIN)/s3m-rm $(BIN)/s3m-ver $(BIN)/s3m-sync
+TOOLS := $(BIN)/s3m-ls $(BIN)/s3m-du $(BIN)/s3m-rm $(BIN)/s3m-ver $(BIN)/s3m-sync $(BIN)/s3m-cp $(BIN)/s3m-find $(BIN)/s3m-diff
 
 # Shared engine linked into every tool
 CORE := $(OBJ)/s3mcore.o

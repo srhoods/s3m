@@ -176,11 +176,11 @@ static void *worker(void *arg)
             continue;              /* abort: let the queue drain */
         }
         char *bucket, *prefix;
-        int depth = s3m_job_parse(job, &bucket, &prefix);
+        int depth = s3m_job_parse(job, &bucket, &prefix, NULL);
         if (depth >= 0) {
             w.bucket = bucket;
             s3m_list_job(w.h, &stk, bucket, prefix, depth, g.shard_depth,
-                         false, g.mode == MODE_FULL, on_obj, &w);
+                         0, false, g.mode == MODE_FULL, on_obj, &w);
         }
         free(job);
     }
@@ -446,7 +446,7 @@ int main(int argc, char **argv)
         char *key;
         if (s3m_uri_parse("s3m-ls", argv[i], bucket, &key) != 0)
             return 2;
-        s3m_push_job(&stk, bucket, key, 0);
+        s3m_push_job(&stk, bucket, key, 0, 0);
         free(key);
     }
 

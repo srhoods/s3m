@@ -346,17 +346,21 @@ void s3m_stack_destroy(s3m_stack *s)
     pthread_cond_destroy(&s->cv);
 }
 
-char *s3m_job_make(const char *bucket, const char *prefix, int depth)
+char *s3m_job_make(const char *bucket, const char *prefix, int depth,
+                   int tag)
 {
     if (depth > 9)
         depth = 9;
-    return s3m_strdupf("%c%s\x01%s", '0' + depth, bucket, prefix);
+    if (tag < 0 || tag > 63)
+        tag = 0;
+    return s3m_strdupf("%c%c%s\x01%s", '0' + depth, '0' + tag, bucket,
+                       prefix);
 }
 
 void s3m_push_job(s3m_stack *s, const char *bucket, const char *prefix,
-                  int depth)
+                  int depth, int tag)
 {
-    char *j = s3m_job_make(bucket, prefix, depth);
+    char *j = s3m_job_make(bucket, prefix, depth, tag);
     if (!j) {
         s3m_note_error(prefix, "queue", "out of memory");
         return;
@@ -364,16 +368,18 @@ void s3m_push_job(s3m_stack *s, const char *bucket, const char *prefix,
     s3m_stack_push_batch(s, &j, 1);
 }
 
-int s3m_job_parse(char *job, char **bucket, char **prefix)
+int s3m_job_parse(char *job, char **bucket, char **prefix, int *tag)
 {
-    if (job[0] < '0' || job[0] > '9')
+    if (job[0] < '0' || job[0] > '9' || !job[1])
         return -1;
-    char *sep = strchr(job + 1, '\x01');
+    char *sep = strchr(job + 2, '\x01');
     if (!sep)
         return -1;
     *sep = '\0';
-    *bucket = job + 1;
+    *bucket = job + 2;
     *prefix = sep + 1;
+    if (tag)
+        *tag = job[1] - '0';
     return job[0] - '0';
 }
 
@@ -1717,7 +1723,7 @@ static void qadd(char *q, size_t qsz, size_t *o, const char *name,
 
 int s3m_list_job(s3m_http *h, s3m_stack *stk, const char *bucket,
                  const char *prefix, int depth, int shard_depth,
-                 bool versions, bool fetch_owner,
+                 int tag, bool versions, bool fetch_owner,
                  s3m_obj_cb cb, void *ctx)
 {
     bool delim = depth < shard_depth;
@@ -1815,7 +1821,7 @@ int s3m_list_job(s3m_http *h, s3m_stack *stk, const char *bucket,
                     snprintf(owndisp, sizeof owndisp, "%s", x.text);
             } else if (in_cp) {
                 if (!strcmp(x.tag, "Prefix") && stk)
-                    s3m_push_job(stk, bucket, x.text, depth + 1);
+                    s3m_push_job(stk, bucket, x.text, depth + 1, tag);
             } else if (in_entry) {
                 if (!strcmp(x.tag, "Key"))
                     snprintf(keybuf, sizeof keybuf, "%s", x.text);
