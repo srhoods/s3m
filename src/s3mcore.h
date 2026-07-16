@@ -237,6 +237,23 @@ int s3m_copy_object(s3m_http *h, const char *src_bucket,
                     const char *dst_key, uint64_t size,
                     _Atomic uint64_t *ctr, char *err, size_t errsz);
 
+/* ---- local-file transfer helpers -------------------------------------- */
+
+/* Content-Type guess from the file extension */
+const char *s3m_mime_type(const char *name);
+/* create every missing parent directory of path; 0 ok */
+int s3m_mkdirs_for(const char *path);
+/* PUT a local file, streaming; multipart above 128 MiB (aborted
+ * server-side on failure); 0 ok, -1 with a message in err */
+int s3m_upload_file(s3m_http *h, const char *bucket, const char *key,
+                    int fd, uint64_t size, const char *content_type,
+                    _Atomic uint64_t *ctr, char *err, size_t errsz);
+/* GET an object to path atomically (temp file + rename), creating
+ * parent directories; mtime >= 0 is applied to the file */
+int s3m_download_file(s3m_http *h, const char *bucket, const char *key,
+                      const char *path, time_t mtime,
+                      _Atomic uint64_t *ctr, char *err, size_t errsz);
+
 /* ---- minimal XML reader for S3 response documents --------------------- */
 
 enum { S3M_XML_OPEN, S3M_XML_ELEM, S3M_XML_CLOSE };

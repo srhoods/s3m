@@ -29,14 +29,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <curl/curl.h>       /* curl_getdate for Last-Modified parsing */
 #include <openssl/evp.h>     /* local MD5 for --checksum               */
 
-#define S3M_SYNC_VERSION "1.0.0"
-
-#define MP_THRESHOLD ((uint64_t)128 << 20)   /* multipart above 128 MiB */
-#define MP_PARTSIZE  ((uint64_t)64 << 20)    /* 64 MiB parts (grows for
-                                                very large files)       */
+#define S3M_SYNC_VERSION "1.1.0"
 
 enum smode { M_UPLOAD, M_DOWNLOAD, M_REMOTE };
 
@@ -430,155 +425,13 @@ static void walk_local(const char *root, size_t rootlen, bool indexing)
 }
 
 /* ------------------------------------------------------------------ */
-/* transfer helpers                                                     */
+/* transfers (the heavy lifting lives in s3mcore)                       */
 /* ------------------------------------------------------------------ */
 
-static const char *mime_type(const char *rel)
-{
-    static const struct { const char *ext, *type; } tab[] = {
-        { ".txt",  "text/plain" },        { ".html", "text/html" },
-        { ".htm",  "text/html" },         { ".css",  "text/css" },
-        { ".js",   "application/javascript" },
-        { ".json", "application/json" },  { ".xml",  "application/xml" },
-        { ".csv",  "text/csv" },          { ".md",   "text/markdown" },
-        { ".pdf",  "application/pdf" },   { ".png",  "image/png" },
-        { ".jpg",  "image/jpeg" },        { ".jpeg", "image/jpeg" },
-        { ".gif",  "image/gif" },         { ".svg",  "image/svg+xml" },
-        { ".webp", "image/webp" },        { ".mp4",  "video/mp4" },
-        { ".mp3",  "audio/mpeg" },        { ".zip",  "application/zip" },
-        { ".gz",   "application/gzip" },  { ".tar",  "application/x-tar" },
-    };
-    const char *dot = strrchr(rel, '.');
-    if (dot) {
-        for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++)
-            if (!strcasecmp(dot, tab[i].ext))
-                return tab[i].type;
-    }
-    return "application/octet-stream";
-}
-
-static int mkdirs_for(const char *path)
-{
-    char tmp[PATH_MAX];
-    snprintf(tmp, sizeof tmp, "%s", path);
-    char *slash = strrchr(tmp, '/');
-    if (!slash)
-        return 0;
-    *slash = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-                return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-        return -1;
-    return 0;
-}
-
-/* 200-with-error responses are possible on CopyObject and
- * CompleteMultipartUpload; treat a body containing <Error> as failure */
-static bool body_is_error(s3m_resp *r)
-{
-    return r->body && strstr(r->body, "<Error>") != NULL;
-}
-
-static int multipart_upload(s3m_http *h, const char *key, int fd,
-                            uint64_t size, const char *ctype,
-                            s3m_resp *r)
-{
-    /* initiate */
-    if (s3m_req(h, "POST", dst.bucket, key, "uploads=", NULL, 0, ctype,
-                false, NULL, 0, r) != 0 || r->status != 200)
-        return -1;
-    char upid[300] = "";
-    {
-        s3m_xml x;
-        s3m_xml_init(&x, r->body, r->body_len);
-        while (s3m_xml_next(&x))
-            if (x.kind == S3M_XML_ELEM && !strcmp(x.tag, "UploadId"))
-                snprintf(upid, sizeof upid, "%s", x.text);
-        s3m_xml_free(&x);
-    }
-    s3m_resp_free(r);
-    if (!upid[0])
-        return -1;
-
-    uint64_t partsz = MP_PARTSIZE;
-    while (size / partsz + 1 > 10000)
-        partsz *= 2;
-
-    struct rpart { int n; char etag[68]; };
-    size_t nparts = (size_t)((size + partsz - 1) / partsz);
-    struct rpart *parts = calloc(nparts, sizeof *parts);
-    char upid_enc[900];
-    s3m_urlenc(upid, false, upid_enc, sizeof upid_enc);
-
-    int rc = -1;
-    if (parts) {
-        size_t i;
-        for (i = 0; i < nparts; i++) {
-            uint64_t off = (uint64_t)i * partsz;
-            uint64_t len = (off + partsz <= size) ? partsz : size - off;
-            char q[1024];
-            snprintf(q, sizeof q, "partNumber=%zu&uploadId=%s", i + 1,
-                     upid_enc);
-            if (s3m_req_upload(h, dst.bucket, key, q, fd, off, len,
-                               NULL, NULL, 0, &bytes_done, r) != 0 ||
-                r->status != 200)
-                break;
-            parts[i].n = (int)i + 1;
-            if (!s3m_resp_header(r, "ETag", parts[i].etag,
-                                 sizeof parts[i].etag))
-                break;
-            s3m_resp_free(r);
-        }
-        if (i == nparts) {
-            /* complete */
-            size_t bl = 128 + nparts * 160;
-            char *body = malloc(bl);
-            if (body) {
-                size_t o = (size_t)snprintf(body, bl,
-                                            "<CompleteMultipartUpload>");
-                for (size_t j = 0; j < nparts; j++)
-                    o += (size_t)snprintf(body + o, bl - o,
-                        "<Part><PartNumber>%d</PartNumber>"
-                        "<ETag>%s</ETag></Part>",
-                        parts[j].n, parts[j].etag);
-                o += (size_t)snprintf(body + o, bl - o,
-                                      "</CompleteMultipartUpload>");
-                char q[1024];
-                snprintf(q, sizeof q, "uploadId=%s", upid_enc);
-                if (s3m_req(h, "POST", dst.bucket, key, q, body, o,
-                            "application/xml", false, NULL, 0, r) == 0 &&
-                    r->status == 200 && !body_is_error(r))
-                    rc = 0;
-                free(body);
-            }
-        }
-    }
-    free(parts);
-
-    if (rc != 0) {
-        /* abort so the parts don't linger (billed!) */
-        s3m_resp ab;
-        char q[1024];
-        snprintf(q, sizeof q, "uploadId=%s", upid_enc);
-        s3m_req(h, "DELETE", dst.bucket, key, q, NULL, 0, NULL, false,
-                NULL, 0, &ab);
-        s3m_resp_free(&ab);
-    }
-    return rc;
-}
-
-/* execute one copy action; returns 0 and fills nothing, or -1 with a
- * message in err */
+/* execute one copy action; returns 0, or -1 with a message in err */
 static int do_copy(s3m_http *h, const struct action *a,
                    char *err, size_t errsz)
 {
-    s3m_resp r = { 0 };
     int rc = -1;
 
     if (g.mode == M_UPLOAD) {
@@ -588,15 +441,9 @@ static int do_copy(s3m_http *h, const struct action *a,
         if (fd < 0) {
             snprintf(err, errsz, "open: %s", strerror(errno));
         } else {
-            const char *ct = mime_type(a->rel);
-            if (a->size > MP_THRESHOLD)
-                rc = multipart_upload(h, key, fd, a->size, ct, &r);
-            else if (s3m_req_upload(h, dst.bucket, key, NULL, fd, 0,
-                                    a->size, ct, NULL, 0, &bytes_done,
-                                    &r) == 0 && r.status == 200)
-                rc = 0;
-            if (rc != 0 && !err[0])
-                s3m_resp_errstr(&r, err, errsz);
+            rc = s3m_upload_file(h, dst.bucket, key, fd, a->size,
+                                 s3m_mime_type(a->rel), &bytes_done,
+                                 err, errsz);
             close(fd);
         }
         free(path);
@@ -604,42 +451,13 @@ static int do_copy(s3m_http *h, const struct action *a,
     } else if (g.mode == M_DOWNLOAD) {
         char *path = s3m_strdupf("%s/%s", dst.dir, a->rel);
         char *key  = s3m_strdupf("%s%s", src.prefix, a->rel);
-        char *tmp  = s3m_strdupf("%s.s3m-tmp-XXXXXX", path ? path : "");
-        if (path && key && tmp && mkdirs_for(path) == 0) {
-            int fd = mkstemp(tmp);
-            if (fd < 0) {
-                snprintf(err, errsz, "mkstemp: %s", strerror(errno));
-            } else {
-                if (s3m_req_download(h, src.bucket, key, NULL, fd,
-                                     &bytes_done, &r) == 0 &&
-                    r.status == 200) {
-                    struct timespec ts[2] = {
-                        { a->mtime, 0 }, { a->mtime, 0 }
-                    };
-                    if (a->mtime != (time_t)-1)
-                        futimens(fd, ts);
-                    if (close(fd) == 0 && rename(tmp, path) == 0) {
-                        fd = -1;
-                        rc = 0;
-                    } else {
-                        fd = -1;
-                        snprintf(err, errsz, "rename: %s",
-                                 strerror(errno));
-                    }
-                } else {
-                    s3m_resp_errstr(&r, err, errsz);
-                }
-                if (fd >= 0)
-                    close(fd);
-                if (rc != 0)
-                    unlink(tmp);
-            }
-        } else if (!err[0]) {
-            snprintf(err, errsz, "mkdir: %s", strerror(errno));
-        }
+        if (path && key)
+            rc = s3m_download_file(h, src.bucket, key, path, a->mtime,
+                                   &bytes_done, err, errsz);
+        else
+            snprintf(err, errsz, "out of memory");
         free(path);
         free(key);
-        free(tmp);
     } else {                          /* M_REMOTE: server-side copy */
         char *skey = s3m_strdupf("%s%s", src.prefix, a->rel);
         char *dkey = s3m_strdupf("%s%s", dst.prefix, a->rel);
@@ -649,7 +467,6 @@ static int do_copy(s3m_http *h, const struct action *a,
         free(skey);
         free(dkey);
     }
-    s3m_resp_free(&r);
     return rc;
 }
 

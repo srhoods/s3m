@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <curl/curl.h>
@@ -1578,6 +1579,207 @@ int s3m_copy_object(s3m_http *h, const char *src_bucket,
         s3m_resp_free(&ab);
     }
     free(cs_hdr);
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* local-file transfer helpers                                          */
+/* ------------------------------------------------------------------ */
+
+#define UP_MP_THRESHOLD ((uint64_t)128 << 20)  /* multipart above this */
+#define UP_MP_PARTSIZE  ((uint64_t)64 << 20)
+
+const char *s3m_mime_type(const char *name)
+{
+    static const struct { const char *ext, *type; } tab[] = {
+        { ".txt",  "text/plain" },        { ".html", "text/html" },
+        { ".htm",  "text/html" },         { ".css",  "text/css" },
+        { ".js",   "application/javascript" },
+        { ".json", "application/json" },  { ".xml",  "application/xml" },
+        { ".csv",  "text/csv" },          { ".md",   "text/markdown" },
+        { ".pdf",  "application/pdf" },   { ".png",  "image/png" },
+        { ".jpg",  "image/jpeg" },        { ".jpeg", "image/jpeg" },
+        { ".gif",  "image/gif" },         { ".svg",  "image/svg+xml" },
+        { ".webp", "image/webp" },        { ".mp4",  "video/mp4" },
+        { ".mp3",  "audio/mpeg" },        { ".zip",  "application/zip" },
+        { ".gz",   "application/gzip" },  { ".tar",  "application/x-tar" },
+    };
+    const char *dot = strrchr(name, '.');
+    if (dot) {
+        for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++)
+            if (!strcasecmp(dot, tab[i].ext))
+                return tab[i].type;
+    }
+    return "application/octet-stream";
+}
+
+int s3m_mkdirs_for(const char *path)
+{
+    char tmp[4096];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    char *slash = strrchr(tmp, '/');
+    if (!slash)
+        return 0;
+    *slash = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+                return -1;
+            *p = '/';
+        }
+    }
+    if (tmp[0] && mkdir(tmp, 0777) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
+}
+
+int s3m_upload_file(s3m_http *h, const char *bucket, const char *key,
+                    int fd, uint64_t size, const char *content_type,
+                    _Atomic uint64_t *ctr, char *err, size_t errsz)
+{
+    s3m_resp r = { 0 };
+
+    if (size <= UP_MP_THRESHOLD) {
+        int rc = -1;
+        if (s3m_req_upload(h, bucket, key, NULL, fd, 0, size,
+                           content_type, NULL, 0, ctr, &r) == 0 &&
+            r.status == 200)
+            rc = 0;
+        else
+            s3m_resp_errstr(&r, err, errsz);
+        s3m_resp_free(&r);
+        return rc;
+    }
+
+    /* multipart upload */
+    if (s3m_req(h, "POST", bucket, key, "uploads=", NULL, 0,
+                content_type, false, NULL, 0, &r) != 0 ||
+        r.status != 200) {
+        s3m_resp_errstr(&r, err, errsz);
+        s3m_resp_free(&r);
+        return -1;
+    }
+    char upid[300];
+    xml_find_elem(r.body, r.body_len, "UploadId", upid, sizeof upid);
+    s3m_resp_free(&r);
+    if (!upid[0]) {
+        snprintf(err, errsz, "no UploadId in initiate response");
+        return -1;
+    }
+    char upid_enc[900];
+    s3m_urlenc(upid, false, upid_enc, sizeof upid_enc);
+
+    uint64_t partsz = UP_MP_PARTSIZE;
+    while (size / partsz + 1 > 10000)
+        partsz *= 2;
+    size_t nparts = (size_t)((size + partsz - 1) / partsz);
+
+    char *etags = calloc(nparts, 68);
+    size_t done = 0;
+    int rc = -1;
+    if (etags) {
+        for (; done < nparts; done++) {
+            uint64_t off = (uint64_t)done * partsz;
+            uint64_t len = (off + partsz <= size) ? partsz : size - off;
+            char q[1024];
+            snprintf(q, sizeof q, "partNumber=%zu&uploadId=%s",
+                     done + 1, upid_enc);
+            if (s3m_req_upload(h, bucket, key, q, fd, off, len, NULL,
+                               NULL, 0, ctr, &r) != 0 ||
+                r.status != 200 ||
+                !s3m_resp_header(&r, "ETag", etags + done * 68, 68)) {
+                s3m_resp_errstr(&r, err, errsz);
+                s3m_resp_free(&r);
+                break;
+            }
+            s3m_resp_free(&r);
+        }
+        if (done == nparts) {
+            size_t bl = 128 + nparts * 160;
+            char *body = malloc(bl);
+            if (body) {
+                size_t o = (size_t)snprintf(body, bl,
+                                            "<CompleteMultipartUpload>");
+                for (size_t j = 0; j < nparts; j++)
+                    o += (size_t)snprintf(body + o, bl - o,
+                        "<Part><PartNumber>%zu</PartNumber>"
+                        "<ETag>%s</ETag></Part>", j + 1, etags + j * 68);
+                o += (size_t)snprintf(body + o, bl - o,
+                                      "</CompleteMultipartUpload>");
+                char q[1024];
+                snprintf(q, sizeof q, "uploadId=%s", upid_enc);
+                if (s3m_req(h, "POST", bucket, key, q, body, o,
+                            "application/xml", false, NULL, 0, &r) == 0 &&
+                    r.status == 200 && !copy_body_error(&r))
+                    rc = 0;
+                else
+                    s3m_resp_errstr(&r, err, errsz);
+                s3m_resp_free(&r);
+                free(body);
+            } else {
+                snprintf(err, errsz, "out of memory");
+            }
+        }
+    } else {
+        snprintf(err, errsz, "out of memory");
+    }
+    free(etags);
+
+    if (rc != 0) {
+        s3m_resp ab;
+        char q[1024];
+        snprintf(q, sizeof q, "uploadId=%s", upid_enc);
+        s3m_req(h, "DELETE", bucket, key, q, NULL, 0, NULL, false,
+                NULL, 0, &ab);
+        s3m_resp_free(&ab);
+    }
+    return rc;
+}
+
+int s3m_download_file(s3m_http *h, const char *bucket, const char *key,
+                      const char *path, time_t mtime,
+                      _Atomic uint64_t *ctr, char *err, size_t errsz)
+{
+    if (s3m_mkdirs_for(path) != 0) {
+        snprintf(err, errsz, "mkdir: %s", strerror(errno));
+        return -1;
+    }
+    char *tmp = s3m_strdupf("%s.s3m-tmp-XXXXXX", path);
+    if (!tmp) {
+        snprintf(err, errsz, "out of memory");
+        return -1;
+    }
+    int rc = -1;
+    int fd = mkstemp(tmp);
+    if (fd < 0) {
+        snprintf(err, errsz, "mkstemp: %s", strerror(errno));
+        free(tmp);
+        return -1;
+    }
+    s3m_resp r;
+    if (s3m_req_download(h, bucket, key, NULL, fd, ctr, &r) == 0 &&
+        r.status == 200) {
+        if (mtime >= 0) {
+            struct timespec ts[2] = { { mtime, 0 }, { mtime, 0 } };
+            futimens(fd, ts);
+        }
+        if (close(fd) == 0 && rename(tmp, path) == 0) {
+            fd = -1;
+            rc = 0;
+        } else {
+            fd = -1;
+            snprintf(err, errsz, "rename: %s", strerror(errno));
+        }
+    } else {
+        s3m_resp_errstr(&r, err, errsz);
+    }
+    s3m_resp_free(&r);
+    if (fd >= 0)
+        close(fd);
+    if (rc != 0)
+        unlink(tmp);
+    free(tmp);
     return rc;
 }
 
