@@ -33,6 +33,7 @@ misleading).
 | `-c, --checksum` | Verify contents where the cheap checks are inconclusive. In a local-vs-S3 run, a file whose object has a conclusive etag is verified by **hashing the local file — no network I/O at all**; every other pair is compared byte-for-byte in 8 MiB chunks (local reads / ranged GETs), **stopping at the first differing byte** and reporting that offset. Sizes gate everything: size-mismatched objects are never read. |
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallel listing, 0–9 (default 2). |
+| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
 | `-o, --output FILE` | Write the CSV listing to `FILE` and show a live progress display. |
 | `-q, --quiet` | Suppress the listing. The summary and **verdict** still print, making `-q` a fast "are these the same?" check. |
 | `-h, --help`, `-V, --version` | Usage / version. |

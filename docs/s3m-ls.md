@@ -26,6 +26,7 @@ same run, and may name different buckets.
 | `-j, --threads N` | Number of worker threads, 1–256. Default: 16. |
 | `--class CLASSES` | Only output objects of these storage classes (comma-separated, case-insensitive), e.g. `--class STANDARD,GLACIER`. |
 | `--shard-depth N` | Prefix levels to expand for parallelism, 0–9 (default 2). See [Sharding](#sharding-and-performance). |
+| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
 | `-o, --output FILE` | Write the CSV to `FILE` instead of stdout, and show a live progress display on the terminal. |
 | `-q, --quiet` | Suppress the console listing. Progress (on a terminal) and the end-of-run summary are still shown, and a `-o` file is still written in full — `-q` only silences stdout. |
 | `-h, --help` | Show usage and exit. |

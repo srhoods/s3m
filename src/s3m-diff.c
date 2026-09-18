@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -47,7 +48,10 @@ static struct {
     bool        quiet;
     bool        suppress;
     bool        progress;
+    bool        rrdns;
 } g = { .nthreads = 16, .shard_depth = 2 };
+
+static s3m_endpoint_pool endpoints;
 
 static _Atomic uint64_t n_left;        /* left objects indexed        */
 static _Atomic uint64_t n_right;       /* right objects scanned       */
@@ -299,9 +303,14 @@ static void walk_local(struct wctx *w, const char *root, size_t rootlen,
     closedir(d);
 }
 
+struct list_arg {
+    bool left;
+    int  idx;               /* worker index: initial endpoint pick   */
+};
+
 static void *list_worker(void *arg)
 {
-    bool left = arg != NULL;
+    struct list_arg *la = arg;
     struct wctx w;
     w.h = s3m_http_new();
     if (!w.h || s3m_ob_init(&w.ob, &sink) != 0) {
@@ -312,6 +321,8 @@ static void *list_worker(void *arg)
             free(j);
         return NULL;
     }
+    if (g.rrdns)
+        s3m_http_pin_endpoint(w.h, &endpoints, (size_t)la->idx);
     char *job;
     while ((job = s3m_stack_pop(&stk)) != NULL) {
         char *bucket, *prefix;
@@ -319,8 +330,10 @@ static void *list_worker(void *arg)
         if (depth >= 0)
             s3m_list_job(w.h, &stk, bucket, prefix, depth, g.shard_depth,
                          0, false, false,
-                         left ? on_left_obj : on_right_obj, &w);
+                         la->left ? on_left_obj : on_right_obj, &w);
         free(job);
+        if (g.rrdns && s3m_http_transport_failed(w.h))
+            s3m_http_rotate_endpoint(w.h, &endpoints);
     }
     s3m_ob_flush(&w.ob);
     s3m_ob_free(&w.ob);
@@ -380,7 +393,7 @@ static bool side_chunk(s3m_http *h, const struct side *s,
 
 static void *verify_worker(void *arg)
 {
-    (void)arg;
+    int idx = (int)(intptr_t)arg;
     struct wctx w;
     w.h = s3m_http_new();
     char *lbuf = L.is_s3 ? NULL : malloc(CHUNK);
@@ -393,6 +406,8 @@ static void *verify_worker(void *arg)
         free(rbuf);
         return NULL;
     }
+    if (g.rrdns)
+        s3m_http_pin_endpoint(w.h, &endpoints, (size_t)idx);
     for (;;) {
         size_t i = atomic_fetch_add(&next_cand, 1);
         if (i >= ncands)
@@ -491,6 +506,8 @@ static void *verify_worker(void *arg)
                                       memory_order_relaxed);
             emit_diff(&w.ob, cd->rel, "content", at, "");
         }
+        if (g.rrdns && s3m_http_transport_failed(w.h))
+            s3m_http_rotate_endpoint(w.h, &endpoints);
     }
     free(lbuf);
     free(rbuf);
@@ -504,12 +521,15 @@ static void *verify_worker(void *arg)
 /* shared pool runner                                                   */
 /* ------------------------------------------------------------------ */
 
-static int run_pool(void *(*fn)(void *), void *arg)
+static int run_pool(bool left)
 {
     pthread_t tids[256];
+    struct list_arg args[256];
     int started = 0;
     for (int i = 0; i < g.nthreads; i++) {
-        if (pthread_create(&tids[i], NULL, fn, arg) != 0)
+        args[i].left = left;
+        args[i].idx = i;
+        if (pthread_create(&tids[i], NULL, list_worker, &args[i]) != 0)
             break;
         started++;
     }
@@ -697,6 +717,10 @@ static void usage(FILE *to)
 "  -j, --threads N      worker threads, 1-256 (default: 16)\n"
 "      --shard-depth N  prefix levels to expand for parallelism, 0-9\n"
 "                       (default: 2)\n"
+"      --rrdns          resolve the endpoint hostname to every A/AAAA\n"
+"                       address it has and spread worker threads across\n"
+"                       them (round robin), moving a thread to the next\n"
+"                       address if its current one starts failing\n"
 "  -o, --output FILE    write the CSV to FILE; show live progress\n"
 "  -q, --quiet          suppress the listing; the summary and verdict\n"
 "                       still print — a fast \"are these the same?\"\n"
@@ -712,6 +736,7 @@ int main(int argc, char **argv)
         { "checksum",    no_argument,       NULL, 'c' },
         { "threads",     required_argument, NULL, 'j' },
         { "shard-depth", required_argument, NULL, 1001 },
+        { "rrdns",       no_argument,       NULL, 1002 },
         { "output",      required_argument, NULL, 'o' },
         { "quiet",       no_argument,       NULL, 'q' },
         { "help",        no_argument,       NULL, 'h' },
@@ -750,6 +775,9 @@ int main(int argc, char **argv)
             g.shard_depth = (int)v;
             break;
         }
+        case 1002:
+            g.rrdns = true;
+            break;
         case 'o':
             g.outpath = optarg;
             break;
@@ -823,6 +851,8 @@ int main(int argc, char **argv)
 
     if (s3m_config_finalize("s3m-diff") != 0)
         return 2;
+    if (g.rrdns && s3m_endpoint_pool_init(&endpoints, "s3m-diff") != 0)
+        return 2;
     if (s3m_http_global_init() != 0) {
         fprintf(stderr, "s3m-diff: could not initialise libcurl\n");
         return 2;
@@ -872,7 +902,7 @@ int main(int argc, char **argv)
     if (L.is_s3) {
         s3m_stack_init(&stk, g.nthreads);
         s3m_push_job(&stk, L.bucket, L.prefix, 0, 0);
-        if (run_pool(list_worker, (void *)1) != 0) {
+        if (run_pool(true) != 0) {
             fprintf(stderr, "s3m-diff: could not start worker threads\n");
             return 2;
         }
@@ -886,7 +916,7 @@ int main(int argc, char **argv)
     if (R.is_s3) {
         s3m_stack_init(&stk, g.nthreads);
         s3m_push_job(&stk, R.bucket, R.prefix, 0, 0);
-        if (run_pool(list_worker, NULL) != 0) {
+        if (run_pool(false) != 0) {
             fprintf(stderr, "s3m-diff: could not start worker threads\n");
             return 2;
         }
@@ -924,7 +954,8 @@ int main(int argc, char **argv)
         pthread_t tids[256];
         int started = 0;
         for (int i = 0; i < g.nthreads; i++) {
-            if (pthread_create(&tids[i], NULL, verify_worker, NULL) != 0)
+            if (pthread_create(&tids[i], NULL, verify_worker,
+                               (void *)(intptr_t)i) != 0)
                 break;
             started++;
         }
@@ -955,6 +986,8 @@ int main(int argc, char **argv)
 
     print_summary(elapsed);
     s3m_print_errors();
+    if (g.rrdns)
+        s3m_endpoint_pool_destroy(&endpoints);
 
     if (atomic_load(&s3m_nerrors))
         return 2;

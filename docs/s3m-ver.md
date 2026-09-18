@@ -37,6 +37,7 @@ deleted.
 |--------|-------------|
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallelism, 0–9 (default 2). |
+| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
 | `-o, --output FILE` | Write the CSV to `FILE` and show a live progress display. |
 | `-q, --quiet` | Suppress the console listing (progress and summary still shown). |
 | `-h, --help`, `-V, --version` | Usage / version. |

@@ -29,7 +29,7 @@ s3m-sync [OPTIONS] SRC DST
 | `--checksum` | Compare content: local MD5 against the object etag where the etag is conclusive (single-part uploads); multipart etags fall back to size+mtime. S3→S3 compares etags directly; local→local hashes both files. |
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallel listing, 0–9 (default 2). |
-| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them instead of letting them all collapse onto whatever address the resolver/OS picks first. |
+| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
 | `-o, --output FILE` | Write the CSV plan/report to `FILE` and show a live progress display. |
 | `-q, --quiet` | Suppress the console listing (progress and the summary are still shown). |
 | `-h, --help`, `-V, --version` | Usage / version. |
@@ -155,25 +155,11 @@ s3m-sync --apply --delete /data/projects /mnt/backup/projects
 
 ## Load balancing across multiple endpoint addresses
 
-`--rrdns` resolves the endpoint's hostname (via normal DNS — A and AAAA
-records) once at startup and assigns each worker thread its own address
-from the list, round robin: with 16 threads and 4 resolved addresses,
-each address gets 4 threads. If there are more threads than resolved
-addresses, several threads simply share an address. The TCP connection
-is pinned to the assigned address, but the `Host` header, TLS SNI and
-the SigV4 signature always use the original hostname, so this is
-transparent to certificates and to any endpoint that validates the
-`Host` header — it changes only which address a thread's traffic goes
-to, not how requests look on the wire.
-
-If a thread's current address starts failing — connection errors,
-timeouts, or repeated 429/408/5xx after the normal retry budget is
-exhausted — that thread moves to the next address in the list (round
-robin) for its subsequent requests; it does not automatically return to
-the failed one. Requires the endpoint to be a hostname, not a literal
-IP address (nothing to round-robin), and only applies when the run
-talks to S3 at all (`--rrdns` is rejected outright for a local→local
-mirror).
+`--rrdns` spreads worker threads across every address the endpoint
+hostname resolves to — see
+[connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses)
+for how it works. In `s3m-sync` specifically it is rejected outright
+for a local→local mirror, since that mode never talks to S3.
 
 ## Behaviour notes
 

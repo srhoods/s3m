@@ -21,6 +21,7 @@
 #include <fnmatch.h>
 #include <getopt.h>
 #include <regex.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -36,7 +37,10 @@ static struct {
     bool        quiet;
     bool        suppress;
     bool        progress;
+    bool        rrdns;
 } g = { .nthreads = 16, .shard_depth = 2 };
+
+static s3m_endpoint_pool endpoints;
 
 static _Atomic uint64_t n_scanned;
 static _Atomic uint64_t n_matched;
@@ -373,7 +377,7 @@ static void on_obj(void *ctx, const s3m_obj *o)
 
 static void *worker(void *arg)
 {
-    (void)arg;
+    int idx = (int)(intptr_t)arg;
     struct wctx w;
     w.h = s3m_http_new();
     if (!w.h || s3m_ob_init(&w.ob, &sink) != 0) {
@@ -384,6 +388,8 @@ static void *worker(void *arg)
             free(j);
         return NULL;
     }
+    if (g.rrdns)
+        s3m_http_pin_endpoint(w.h, &endpoints, (size_t)idx);
     char *job;
     while ((job = s3m_stack_pop(&stk)) != NULL) {
         char *bucket, *prefix;
@@ -392,6 +398,8 @@ static void *worker(void *arg)
             s3m_list_job(w.h, &stk, bucket, prefix, depth, g.shard_depth,
                          0, g.versions, false, on_obj, &w);
         free(job);
+        if (g.rrdns && s3m_http_transport_failed(w.h))
+            s3m_http_rotate_endpoint(w.h, &endpoints);
     }
     s3m_ob_flush(&w.ob);
     s3m_ob_free(&w.ob);
@@ -506,6 +514,10 @@ static void usage(FILE *to)
 "      --versions       search every stored version and delete marker\n"
 "                       (output gains a version_id column; enables\n"
 "                       -latest and -marker)\n"
+"      --rrdns          resolve the endpoint hostname to every A/AAAA\n"
+"                       address it has and spread worker threads across\n"
+"                       them (round robin), moving a thread to the next\n"
+"                       address if its current one starts failing\n"
 "  -o, --output FILE    write matches to FILE; show live progress\n"
 "  -q, --quiet          no listing; the summary still shows the count\n"
 "  -h, --help           show this help and exit\n"
@@ -541,6 +553,7 @@ int main(int argc, char **argv)
         { "threads",     required_argument, NULL, 'j' },
         { "shard-depth", required_argument, NULL, 1001 },
         { "versions",    no_argument,       NULL, 1002 },
+        { "rrdns",       no_argument,       NULL, 1003 },
         { "output",      required_argument, NULL, 'o' },
         { "quiet",       no_argument,       NULL, 'q' },
         { "help",        no_argument,       NULL, 'h' },
@@ -580,6 +593,9 @@ int main(int argc, char **argv)
         }
         case 1002:
             g.versions = true;
+            break;
+        case 1003:
+            g.rrdns = true;
             break;
         case 'o':
             g.outpath = optarg;
@@ -624,6 +640,8 @@ int main(int argc, char **argv)
     g.progress = (g.outpath || g.quiet) && isatty(STDERR_FILENO);
 
     if (s3m_config_finalize("s3m-find") != 0)
+        return 2;
+    if (g.rrdns && s3m_endpoint_pool_init(&endpoints, "s3m-find") != 0)
         return 2;
     if (s3m_http_global_init() != 0) {
         fprintf(stderr, "s3m-find: could not initialise libcurl\n");
@@ -678,7 +696,8 @@ int main(int argc, char **argv)
     }
     int started = 0;
     for (int i = 0; i < g.nthreads; i++) {
-        if (pthread_create(&tids[i], NULL, worker, NULL) != 0)
+        if (pthread_create(&tids[i], NULL, worker,
+                           (void *)(intptr_t)i) != 0)
             break;
         started++;
     }
@@ -715,6 +734,8 @@ int main(int argc, char **argv)
         print_summary(elapsed);
     s3m_print_errors();
     s3m_stack_destroy(&stk);
+    if (g.rrdns)
+        s3m_endpoint_pool_destroy(&endpoints);
 
     return atomic_load(&s3m_nerrors) ? 1 : 0;
 }

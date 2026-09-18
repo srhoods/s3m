@@ -46,6 +46,32 @@ address, `localhost`, or a single-label hostname — so
 flags. Anything else that needs it (e.g. a self-hosted service behind a
 DNS name without a wildcard record) should pass `--path-style`.
 
+## Load balancing across multiple endpoint addresses
+
+Every tool that runs a worker pool against S3 (`s3m-ls`, `s3m-du`,
+`s3m-rm`, `s3m-ver`, `s3m-find`, `s3m-cp`, `s3m-diff`, `s3m-sync`)
+accepts `--rrdns`. It resolves the endpoint's hostname (via normal
+DNS — A and AAAA records) once at startup and assigns each worker
+thread its own address from the list, round robin: with 16 threads and
+4 resolved addresses, each address gets 4 threads. If there are more
+threads than resolved addresses, several threads simply share an
+address.
+
+The TCP connection is pinned to a thread's assigned address, but the
+`Host` header, TLS SNI and the SigV4 signature always use the original
+hostname, so this is transparent to certificates and to any endpoint
+that validates the `Host` header — it changes only which address a
+thread's traffic goes to, not how requests look on the wire.
+
+If a thread's current address starts failing — connection errors,
+timeouts, or repeated 429/408/5xx after the normal retry budget is
+exhausted — that thread moves to the next address in the list (round
+robin) for its subsequent requests; it does not automatically return
+to the failed one.
+
+Requires the endpoint to be a hostname, not a literal IP address
+(nothing to round-robin).
+
 ## Compatibility notes
 
 - Tested against MinIO; the tools speak plain S3 REST (ListObjectsV2,
