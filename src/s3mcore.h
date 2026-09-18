@@ -187,6 +187,37 @@ int       s3m_http_global_init(void);    /* once, before threads  */
 s3m_http *s3m_http_new(void);
 void      s3m_http_free(s3m_http *h);
 
+/* ---- DNS round-robin endpoint pool ------------------------------------
+ *
+ * Resolves the configured endpoint's hostname to every A/AAAA address it
+ * has, so worker threads can be spread across them instead of each
+ * making its own independent DNS pick (which typically collapses onto
+ * one address via OS/resolver caching). The Host header, TLS SNI and
+ * SigV4 signature always stay on the configured hostname — only the TCP
+ * connection target changes — so this is transparent to certificates
+ * and to S3-compatible services that validate the Host header.
+ */
+
+typedef struct {
+    char   **addrs;             /* resolved addresses, textual form */
+    size_t   n;
+    _Atomic size_t cursor;       /* round-robin assignment counter */
+} s3m_endpoint_pool;
+
+/* resolve the finalized endpoint's hostname; 0 ok (pool->n >= 1),
+ * -1 on DNS failure (message printed with `tool` prefix) */
+int  s3m_endpoint_pool_init(s3m_endpoint_pool *pool, const char *tool);
+void s3m_endpoint_pool_destroy(s3m_endpoint_pool *pool);
+
+/* pins h's connections to pool member `i % pool->n` */
+void s3m_http_pin_endpoint(s3m_http *h, s3m_endpoint_pool *pool, size_t i);
+/* moves h to the next pool member (round-robin), e.g. after a transport
+ * failure on the current one */
+void s3m_http_rotate_endpoint(s3m_http *h, s3m_endpoint_pool *pool);
+/* true when h's most recent request failed at the transport level
+ * (connection error, timeout, ... — retries against it exhausted) */
+bool s3m_http_transport_failed(const s3m_http *h);
+
 typedef struct {
     long   status;         /* HTTP status; 0 = transport failure */
     char  *body;           /* malloc'd, NUL-terminated (may be empty) */

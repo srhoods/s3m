@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -867,6 +868,12 @@ struct s3m_http {
     CURL        *curl;
     unsigned int seed;                 /* retry jitter */
     char         errbuf[CURL_ERROR_SIZE];
+    /* pinned endpoint (rrdns): CURLOPT_RESOLVE entry mapping the
+     * configured hostname/port to one resolved address; Host header,
+     * SNI and SigV4 signing are untouched */
+    struct curl_slist *resolve;
+    char         pinned_ip[64];
+    bool         transport_failed;     /* set by do_request on give-up */
 };
 
 int s3m_http_global_init(void)
@@ -893,8 +900,156 @@ void s3m_http_free(s3m_http *h)
 {
     if (!h)
         return;
+    curl_slist_free_all(h->resolve);
     curl_easy_cleanup(h->curl);
     free(h);
+}
+
+/* ------------------------------------------------------------------ */
+/* DNS round-robin endpoint pool                                        */
+/* ------------------------------------------------------------------ */
+
+/* host[:port] -> bare host (no port), for both DNS resolution and the
+ * CURLOPT_RESOLVE entry's hostname field */
+static void hostport_host(char *out, size_t outsz)
+{
+    snprintf(out, outsz, "%s", s3m_cfg.hostport);
+    char *colon = strrchr(out, ':');
+    if (colon && strspn(colon + 1, "0123456789") == strlen(colon + 1))
+        *colon = '\0';
+}
+
+static int hostport_port(void)
+{
+    const char *colon = strrchr(s3m_cfg.hostport, ':');
+    if (colon && strspn(colon + 1, "0123456789") == strlen(colon + 1))
+        return atoi(colon + 1);
+    return !strcmp(s3m_cfg.scheme, "https") ? 443 : 80;
+}
+
+int s3m_endpoint_pool_init(s3m_endpoint_pool *pool, const char *tool)
+{
+    memset(pool, 0, sizeof *pool);
+
+    char host[280];
+    hostport_host(host, sizeof host);
+
+    struct in_addr a4;
+    struct in6_addr a6;
+    if (inet_pton(AF_INET, host, &a4) == 1 ||
+        inet_pton(AF_INET6, host, &a6) == 1) {
+        fprintf(stderr,
+                "%s: --rrdns needs a hostname endpoint, not an IP "
+                "address ('%s')\n", tool, host);
+        return -1;
+    }
+
+    struct addrinfo hints = { 0 }, *res;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    int gai = getaddrinfo(host, NULL, &hints, &res);
+    if (gai != 0) {
+        fprintf(stderr, "%s: --rrdns: could not resolve '%s': %s\n",
+                tool, host, gai_strerror(gai));
+        return -1;
+    }
+
+    size_t cap = 8;
+    char **addrs = malloc(cap * sizeof *addrs);
+    size_t n = 0;
+    if (!addrs) {
+        freeaddrinfo(res);
+        fprintf(stderr, "%s: out of memory\n", tool);
+        return -1;
+    }
+    for (struct addrinfo *p = res; p; p = p->ai_next) {
+        char buf[64];
+        const void *addr;
+        if (p->ai_family == AF_INET)
+            addr = &((struct sockaddr_in *)(void *)p->ai_addr)->sin_addr;
+        else if (p->ai_family == AF_INET6)
+            addr = &((struct sockaddr_in6 *)(void *)p->ai_addr)->sin6_addr;
+        else
+            continue;
+        if (!inet_ntop(p->ai_family, addr, buf, sizeof buf))
+            continue;
+        bool dup = false;
+        for (size_t i = 0; i < n; i++)
+            if (!strcmp(addrs[i], buf)) {
+                dup = true;
+                break;
+            }
+        if (dup)
+            continue;
+        if (n == cap) {
+            cap *= 2;
+            char **na = realloc(addrs, cap * sizeof *addrs);
+            if (!na)
+                break;
+            addrs = na;
+        }
+        addrs[n] = strdup(buf);
+        if (!addrs[n])
+            break;
+        n++;
+    }
+    freeaddrinfo(res);
+
+    if (n == 0) {
+        free(addrs);
+        fprintf(stderr, "%s: --rrdns: '%s' resolved to no usable "
+                "addresses\n", tool, host);
+        return -1;
+    }
+    pool->addrs = addrs;
+    pool->n = n;
+    return 0;
+}
+
+void s3m_endpoint_pool_destroy(s3m_endpoint_pool *pool)
+{
+    for (size_t i = 0; i < pool->n; i++)
+        free(pool->addrs[i]);
+    free(pool->addrs);
+    memset(pool, 0, sizeof *pool);
+}
+
+void s3m_http_pin_endpoint(s3m_http *h, s3m_endpoint_pool *pool, size_t i)
+{
+    if (!pool->n)
+        return;
+    const char *ip = pool->addrs[i % pool->n];
+    if (!strcmp(h->pinned_ip, ip))
+        return;
+
+    char host[280];
+    hostport_host(host, sizeof host);
+    int port = hostport_port();
+
+    char entry[360];
+    snprintf(entry, sizeof entry, "%s:%d:%s", host, port, ip);
+
+    struct curl_slist *nl = curl_slist_append(NULL, entry);
+    if (!nl)
+        return;
+    curl_slist_free_all(h->resolve);
+    h->resolve = nl;
+    snprintf(h->pinned_ip, sizeof h->pinned_ip, "%s", ip);
+    curl_easy_setopt(h->curl, CURLOPT_RESOLVE, h->resolve);
+}
+
+void s3m_http_rotate_endpoint(s3m_http *h, s3m_endpoint_pool *pool)
+{
+    if (!pool->n)
+        return;
+    size_t i = atomic_fetch_add_explicit(&pool->cursor, 1,
+                                         memory_order_relaxed);
+    s3m_http_pin_endpoint(h, pool, i);
+}
+
+bool s3m_http_transport_failed(const s3m_http *h)
+{
+    return h->transport_failed;
 }
 
 /* growable response buffer */
@@ -1156,6 +1311,7 @@ struct reqspec {
 static int do_request(s3m_http *h, const struct reqspec *q, s3m_resp *r)
 {
     memset(r, 0, sizeof *r);
+    h->transport_failed = false;
 
     /* ---- URL + canonical path ---- */
     bool vhost = !s3m_cfg.path_style && q->bucket && q->bucket[0];
@@ -1230,6 +1386,8 @@ static int do_request(s3m_http *h, const struct reqspec *q, s3m_resp *r)
         CURL *cl = h->curl;
         curl_easy_reset(cl);
         curl_easy_setopt(cl, CURLOPT_URL, url);
+        if (h->resolve)
+            curl_easy_setopt(cl, CURLOPT_RESOLVE, h->resolve);
         curl_easy_setopt(cl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(cl, CURLOPT_ERRORBUFFER, h->errbuf);
         curl_easy_setopt(cl, CURLOPT_CONNECTTIMEOUT, 15L);
@@ -1374,8 +1532,11 @@ static int do_request(s3m_http *h, const struct reqspec *q, s3m_resp *r)
         snprintf(r->msg, sizeof r->msg, "%.191s",
                  h->errbuf[0] ? h->errbuf : curl_easy_strerror(rc));
         r->status = 0;
+        h->transport_failed = true;
         return -1;
     }
+    if (status >= 500 || status == 429 || status == 408)
+        h->transport_failed = true;    /* endpoint looked unhealthy */
     if (status >= 400)
         parse_error_xml(r);
     return 0;
