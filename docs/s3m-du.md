@@ -36,6 +36,7 @@ lexicographically.
 | `--versions` | Include non-current versions and delete markers in the totals. |
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallelism, 0–9 (default 2; 0 = one flat serial listing). See [s3m-ls](s3m-ls.md#sharding-and-performance). |
+| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
 | `-o, --output FILE` | Write the report to `FILE`. |
 | `-q, --quiet` | Suppress the report on stdout (the summary is still shown). |
 | `--help`, `-V, --version` | Usage / version. |

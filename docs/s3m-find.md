@@ -27,6 +27,7 @@ token and rejected). With no expression, everything matches.
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallelism, 0–9 (default 2). |
 | `--versions` | Search every stored version and delete marker instead of just current objects. Output gains a `version_id` column and the `-latest` / `-marker` tests become available. |
+| `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
 | `-o, --output FILE` | Write matches to `FILE` and show a live progress display. |
 | `-q, --quiet` | Suppress the listing; the summary still shows the **match count**, making `-q` a fast "how many?" mode. |
 | `-h, --help`, `-V, --version` | Usage / version. |
