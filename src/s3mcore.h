@@ -277,10 +277,13 @@ int s3m_file_md5(const char *path, char out[33]);
 /* create every missing parent directory of path; 0 ok */
 int s3m_mkdirs_for(const char *path);
 /* PUT a local file, streaming; multipart above 128 MiB (aborted
- * server-side on failure); 0 ok, -1 with a message in err */
+ * server-side on failure); 0 ok, -1 with a message in err.  With
+ * s3fs_meta, the file's mode/mtime/uid/gid are stored as the
+ * x-amz-meta-* attributes s3fs reads, so the object mounts natively. */
 int s3m_upload_file(s3m_http *h, const char *bucket, const char *key,
                     int fd, uint64_t size, const char *content_type,
-                    _Atomic uint64_t *ctr, char *err, size_t errsz);
+                    bool s3fs_meta, _Atomic uint64_t *ctr,
+                    char *err, size_t errsz);
 /* GET an object to path atomically (temp file + rename), creating
  * parent directories; mtime >= 0 is applied to the file */
 int s3m_download_file(s3m_http *h, const char *bucket, const char *key,

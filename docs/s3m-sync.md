@@ -30,6 +30,7 @@ s3m-sync [OPTIONS] SRC DST
 | `-j, --threads N` | Worker threads, 1–256 (default 16). |
 | `--shard-depth N` | Prefix levels expanded for parallel listing, 0–9 (default 2). |
 | `--rrdns` | Resolve the endpoint hostname to every A/AAAA address it has and spread worker threads across them. See [connection.md](connection.md#load-balancing-across-multiple-endpoint-addresses). |
+| `--s3fs-meta` | Local→S3 only (rejected otherwise). On uploads, store each file's mode, mtime, uid and gid as the `x-amz-meta-*` attributes [s3fs](https://github.com/s3fs-fuse/s3fs-fuse) reads, so the objects look native when the bucket is mounted with s3fs (otherwise s3fs falls back to default permissions and the upload time as mtime). Multipart uploads carry them on the initiate request. |
 | `-o, --output FILE` | Write the CSV plan/report to `FILE` and show a live progress display. |
 | `-q, --quiet` | Suppress the console listing (progress and the summary are still shown). |
 | `-h, --help`, `-V, --version` | Usage / version. |

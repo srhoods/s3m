@@ -1830,14 +1830,33 @@ int s3m_mkdirs_for(const char *path)
 
 int s3m_upload_file(s3m_http *h, const char *bucket, const char *key,
                     int fd, uint64_t size, const char *content_type,
-                    _Atomic uint64_t *ctr, char *err, size_t errsz)
+                    bool s3fs_meta, _Atomic uint64_t *ctr,
+                    char *err, size_t errsz)
 {
     s3m_resp r = { 0 };
+
+    /* s3fs keeps POSIX attributes in x-amz-meta-* headers */
+    char mbuf[4][64];
+    const char *xh[4];
+    size_t nxh = 0;
+    struct stat st;
+    if (s3fs_meta && fstat(fd, &st) == 0) {
+        snprintf(mbuf[0], sizeof mbuf[0], "x-amz-meta-mode:%lu",
+                 (unsigned long)st.st_mode);
+        snprintf(mbuf[1], sizeof mbuf[1], "x-amz-meta-mtime:%lld",
+                 (long long)st.st_mtime);
+        snprintf(mbuf[2], sizeof mbuf[2], "x-amz-meta-uid:%lu",
+                 (unsigned long)st.st_uid);
+        snprintf(mbuf[3], sizeof mbuf[3], "x-amz-meta-gid:%lu",
+                 (unsigned long)st.st_gid);
+        for (; nxh < 4; nxh++)
+            xh[nxh] = mbuf[nxh];
+    }
 
     if (size <= UP_MP_THRESHOLD) {
         int rc = -1;
         if (s3m_req_upload(h, bucket, key, NULL, fd, 0, size,
-                           content_type, NULL, 0, ctr, &r) == 0 &&
+                           content_type, xh, nxh, ctr, &r) == 0 &&
             r.status == 200)
             rc = 0;
         else
@@ -1848,7 +1867,7 @@ int s3m_upload_file(s3m_http *h, const char *bucket, const char *key,
 
     /* multipart upload */
     if (s3m_req(h, "POST", bucket, key, "uploads=", NULL, 0,
-                content_type, false, NULL, 0, &r) != 0 ||
+                content_type, false, xh, nxh, &r) != 0 ||
         r.status != 200) {
         s3m_resp_errstr(&r, err, errsz);
         s3m_resp_free(&r);

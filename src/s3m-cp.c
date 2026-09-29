@@ -60,6 +60,7 @@ static struct {
     bool        suppress;
     bool        progress;
     bool        rrdns;
+    bool        s3fs_meta;
 } g = { .nthreads = 16, .shard_depth = 2 };
 
 static s3m_endpoint_pool endpoints;
@@ -454,7 +455,8 @@ static void *exec_worker(void *arg)
             } else {
                 rc = s3m_upload_file(w.h, dst_bucket, a->dst, fd,
                                      a->size, s3m_mime_type(a->src),
-                                     &bytes_done, err, sizeof err);
+                                     g.s3fs_meta, &bytes_done, err,
+                                     sizeof err);
                 close(fd);
             }
             break;
@@ -685,6 +687,9 @@ static void usage(FILE *to)
 "                        address it has and spread worker threads across\n"
 "                        them (round robin), moving a thread to the next\n"
 "                        address if its current one starts failing\n"
+"      --s3fs-meta       store each uploaded file's mode, mtime, uid and\n"
+"                        gid as x-amz-meta-* attributes, so the objects\n"
+"                        look native when the bucket is mounted with s3fs\n"
 "  -o, --output FILE     write the CSV plan/report to FILE; show progress\n"
 "  -q, --quiet           suppress the console listing (progress and the\n"
 "                        summary are still shown)\n"
@@ -709,6 +714,7 @@ int main(int argc, char **argv)
         { "threads",     required_argument, NULL, 'j' },
         { "shard-depth", required_argument, NULL, 1004 },
         { "rrdns",       no_argument,       NULL, 1005 },
+        { "s3fs-meta",   no_argument,       NULL, 1006 },
         { "output",      required_argument, NULL, 'o' },
         { "quiet",       no_argument,       NULL, 'q' },
         { "help",        no_argument,       NULL, 'h' },
@@ -755,6 +761,9 @@ int main(int argc, char **argv)
         }
         case 1005:
             g.rrdns = true;
+            break;
+        case 1006:
+            g.s3fs_meta = true;
             break;
         case 'o':
             g.outpath = optarg;
