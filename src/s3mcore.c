@@ -492,24 +492,38 @@ static void prog_signal(int sig)
     raise(sig);
 }
 
+#define RATE_WINDOW_S 10.0
+#define RATE_RING     128
+
 static void *prog_fn(void *arg)
 {
     fputs("\x1b[?25l", stderr);       /* hide cursor */
     bool first = true;
     int frame = 0;
-    double prev_t = s3m_mono_now(), rate = 0.0;
-    uint64_t prev_items = 0;
+    double rate = 0.0;
+
+    /* rate = progress over a sliding window, so bursts (a large object
+     * finishing, a server-side copy landing all at once) average out */
+    double   ring_t[RATE_RING];
+    uint64_t ring_n[RATE_RING];
+    int head = 0, count = 0;
 
     while (atomic_load(&prog.running)) {
         double t = s3m_mono_now();
         uint64_t items = prog.cfg.items();
-        double dt = t - prev_t;
-        if (dt > 1e-4) {
-            double inst = (double)(items - prev_items) / dt;
-            rate = first ? inst : rate * 0.7 + inst * 0.3;
+        ring_t[head] = t;
+        ring_n[head] = items;
+        head = (head + 1) % RATE_RING;
+        if (count < RATE_RING)
+            count++;
+        int oldest = (head - count + RATE_RING) % RATE_RING;
+        while (count > 2 && t - ring_t[oldest] > RATE_WINDOW_S) {
+            count--;
+            oldest = (oldest + 1) % RATE_RING;
         }
-        prev_t = t;
-        prev_items = items;
+        double dt = t - ring_t[oldest];
+        if (dt > 1e-4)
+            rate = (double)(items - ring_n[oldest]) / dt;
         if (!first)
             fprintf(stderr, "\x1b[%dA", prog.cfg.lines);
         prog.cfg.draw(rate, frame++);
