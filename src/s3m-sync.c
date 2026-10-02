@@ -57,6 +57,7 @@ static struct {
     bool        suppress;
     bool        progress;
     bool        rrdns;        /* --rrdns: spread threads across every    */
+    bool        s3fs_meta;    /* --s3fs-meta: POSIX attrs on uploads     */
 } g = { .nthreads = 16, .shard_depth = 2 };
 
 static s3m_endpoint_pool endpoints;
@@ -527,8 +528,8 @@ static int do_copy(s3m_http *h, const struct action *a,
             snprintf(err, errsz, "open: %s", strerror(errno));
         } else {
             rc = s3m_upload_file(h, dst.bucket, key, fd, a->size,
-                                 s3m_mime_type(a->rel), &bytes_done,
-                                 err, errsz);
+                                 s3m_mime_type(a->rel), g.s3fs_meta,
+                                 &bytes_done, err, errsz);
             close(fd);
         }
         free(path);
@@ -845,6 +846,9 @@ static void usage(FILE *to)
 "                        address it has and spread worker threads across\n"
 "                        them (round robin), moving a thread to the next\n"
 "                        address if its current one starts failing\n"
+"      --s3fs-meta       store each uploaded file's mode, mtime, uid and\n"
+"                        gid as x-amz-meta-* attributes, so the objects\n"
+"                        look native when the bucket is mounted with s3fs\n"
 "  -o, --output FILE     write the CSV plan/report to FILE; show progress\n"
 "  -q, --quiet           suppress the console listing (progress and the\n"
 "                        summary are still shown)\n"
@@ -901,6 +905,7 @@ int main(int argc, char **argv)
         { "threads",     required_argument, NULL, 'j' },
         { "shard-depth", required_argument, NULL, 1005 },
         { "rrdns",       no_argument,       NULL, 1006 },
+        { "s3fs-meta",   no_argument,       NULL, 1007 },
         { "output",      required_argument, NULL, 'o' },
         { "quiet",       no_argument,       NULL, 'q' },
         { "help",        no_argument,       NULL, 'h' },
@@ -950,6 +955,9 @@ int main(int argc, char **argv)
         }
         case 1006:
             g.rrdns = true;
+            break;
+        case 1007:
+            g.s3fs_meta = true;
             break;
         case 'o':
             g.outpath = optarg;
@@ -1035,6 +1043,11 @@ int main(int argc, char **argv)
         }
     }
 
+    if (g.s3fs_meta && g.mode != M_UPLOAD) {
+        fprintf(stderr, "s3m-sync: --s3fs-meta only applies to local->S3 "
+                "uploads\n");
+        return 2;
+    }
     if (g.rrdns && g.mode == M_LOCAL) {
         fprintf(stderr,
                 "s3m-sync: --rrdns has no effect on a local->local "
