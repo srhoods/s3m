@@ -1,0 +1,102 @@
+.TH S3M-FIND 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-find \- parallel find for object storage
+.SH SYNOPSIS
+.B s3m\-find
+[\fIS3M\-OPTIONS\fR] \fBs3://\fIBUCKET\fR[\fB/\fIPREFIX\fR]... [\fIEXPRESSION\fR]
+.SH DESCRIPTION
+Searches buckets in parallel, evaluating a
+.BR find (1)-style
+expression against every object.
+s3m options come first, then URIs, then the expression.
+With no expression everything matches.
+Every test is answered from the listing, so no per-object requests are made.
+.PP
+There is deliberately no \fB\-delete\fR and no \fB\-exec\fR: s3m\-find only reads.
+Pipe matches to
+.BR xargs (1)
+(via \fB\-print0\fR) or to
+.BR s3m\-rm (1),
+which has its own dry run.
+.SH S3M OPTIONS
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.B \-\-versions
+Search every stored version and delete marker.
+Output gains a \fBversion_id\fR column and \fB\-latest\fR and \fB\-marker\fR become available.
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write matches to FILE and show live progress.
+.TP
+.BR \-q ", " \-\-quiet
+No listing; the summary still shows the match count.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH TESTS
+.TP
+.BR \-name " G, " \-iname " G"
+Glob on the last path segment of the key.
+.TP
+.BR \-key " G, " \-ikey " G"
+Glob on the whole key (\fB*\fR also spans \fB/\fR).
+.TP
+.BR \-regex " R, " \-iregex " R"
+POSIX extended regex, anchored to the whole key.
+.TP
+.BR \-size " [+\-]N[ckMGT]"
+Size, rounded up to the unit (default \fBc\fR, bytes).
+.TP
+.BR \-mtime " [+\-]N"
+Age in days, with find's rounding rules.
+.TP
+.BR \-mmin " [+\-]N"
+Age in minutes.
+.TP
+.BR \-class " C"
+Storage class (case-insensitive).
+.TP
+.BR \-etag " E"
+Exact etag (quotes optional).
+.TP
+.B \-empty
+Zero-byte object.
+.TP
+.BR \-latest ", " \-marker
+Current version / delete marker (with \fB\-\-versions\fR).
+.TP
+.BR \-true ", " \-false
+Constants.
+.SH OPERATORS
+In order of precedence, highest first, as in find:
+.PP
+.RS
+.nf
+( EXPR )   ! EXPR, \-not EXPR   EXPR EXPR, EXPR \-a EXPR   EXPR \-o EXPR
+.fi
+.RE
+.SH OUTPUT
+CSV with a \fBkey\fR header (\fBkey,version_id\fR with \fB\-\-versions\fR).
+With \fB\-print0\fR, NUL-separated raw keys for \fBxargs \-0\fR.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH EXIT STATUS
+0 success; 1 completed with errors; 2 usage, startup or safety-guard refusal.
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-ls (1),
+.BR s3m\-rm (1)

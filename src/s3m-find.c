@@ -26,8 +26,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#define S3M_FIND_VERSION "1.0.0"
-
 static struct {
     int         nthreads;
     int         shard_depth;
@@ -608,7 +606,7 @@ int main(int argc, char **argv)
             return 0;
         case 'V':
             printf("s3m-find %s (s3m: Parallel S3 Object Manager)\n",
-                   S3M_FIND_VERSION);
+                   S3M_VERSION);
             return 0;
         default:
             usage(stderr);

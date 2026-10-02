@@ -1,0 +1,82 @@
+.TH S3M-CP 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-cp \- parallel copy
+.SH SYNOPSIS
+.B s3m\-cp
+[\fIOPTIONS\fR] \fISOURCE\fR... \fIDEST\fR
+.SH DESCRIPTION
+Copies objects and files in parallel.
+Each SOURCE is an \fBs3://\fR URI (an exact key, or \fBPREFIX/\fR for its contents) or a local file or directory; DEST is an \fBs3://\fR URI or a local directory:
+.TP
+s3:// to s3://
+server-side copy (no data through the client)
+.TP
+local to s3://
+upload (multipart above 128 MiB)
+.TP
+s3:// to local directory
+download (atomic temp file and rename)
+.TP
+local to local
+refused; use p3m\-cp
+.PP
+By default this is a \fBdry run\fR listing what would be copied; add \fB\-\-apply\fR to copy.
+.SS Destination rules
+.IP \(bu 2
+A prefix or directory SOURCE puts its contents under DEST.
+.IP \(bu 2
+An exact key or file with a DEST ending in \fB/\fR lands at DEST/\fIbasename\fR.
+.IP \(bu 2
+An exact key or file with any other DEST is copied to exactly that key or path (rename-style; single source only).
+.SH OPTIONS
+.TP
+.B \-\-apply
+Actually copy.
+.TP
+.B \-\-overwrite
+Replace existing destination objects or files.
+Without it they are skipped and reported as \fBexists\fR.
+.TP
+.B \-\-move
+Delete each source after its successful copy (batched DeleteObjects, or unlink for local files).
+A failed copy never deletes its source.
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.B \-\-s3fs\-meta
+On uploads, store each file's mode, mtime, uid and gid as the \fBx\-amz\-meta\-*\fR attributes s3fs reads, so the objects look native when the bucket is mounted with s3fs.
+Without it s3fs falls back to default permissions and the upload time as mtime.
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write the CSV plan or report to FILE and show a live progress display.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the console listing; progress and the summary are still shown.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH NOTES
+Objects over 5 GiB are copied server-side with multipart UploadPartCopy.
+Copying a prefix into itself is refused.
+Symbolic links in local sources are never followed.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH EXIT STATUS
+0 success; 1 completed with errors; 2 usage, startup or safety-guard refusal.
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-sync (1),
+.BR s3m\-rm (1)

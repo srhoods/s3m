@@ -18,6 +18,11 @@
 #include <stdio.h>
 #include <time.h>
 
+/* suite version; the Makefile injects it from the VERSION file */
+#ifndef S3M_VERSION
+#define S3M_VERSION "unknown"
+#endif
+
 /* ---- colours (tools set s3m_color once at startup) ------------------ */
 
 extern bool s3m_color;

@@ -1,0 +1,216 @@
+.TH S3M 7 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m \- parallel S3 object manager: conventions shared by all tools
+.SH DESCRIPTION
+s3m is a set of command line tools that parallelise traditionally
+single-threaded object storage operations against Amazon S3 and
+S3-compatible services (MinIO, Ceph RGW, Wasabi, Backblaze B2,
+Cloudflare R2, and others).
+They shard the key space by prefix, keep many requests in flight across
+a pool of worker threads, and batch mutations.
+.SS Tools
+.TP
+.BR s3m\-ls (1)
+Parallel bucket lister.
+.TP
+.BR s3m\-du (1)
+Parallel usage reporter.
+.TP
+.BR s3m\-rm (1)
+Parallel remover.
+.TP
+.BR s3m\-ver (1)
+Version and delete-marker manager.
+.TP
+.BR s3m\-sync (1)
+Parallel synchroniser.
+.TP
+.BR s3m\-cp (1)
+Parallel copy.
+.TP
+.BR s3m\-find (1)
+Parallel find.
+.TP
+.BR s3m\-diff (1)
+Parallel comparison.
+.SH CONVENTIONS
+.IP \(bu 2
+Targets are
+.B s3://BUCKET
+(the whole bucket) or
+.B s3://BUCKET/PREFIX
+(every key starting with PREFIX).
+.IP \(bu 2
+Output is CSV with a header row and RFC 4180 quoting.
+Row order is non-deterministic because the work is parallel.
+.IP \(bu 2
+Anything that changes the object store is a
+.B dry run by default.
+.B \-\-apply
+is the only way to change anything; there is deliberately no
+.B \-\-dry\-run
+flag.
+.IP \(bu 2
+.BR \-j ", " \-\-threads
+sets the worker pool size (default 16, maximum 256).
+S3 concurrency is latency-bound rather than CPU-bound, so raise it
+freely for large jobs.
+.IP \(bu 2
+.BR \-o " FILE"
+writes the output to FILE and shows a live progress block on the
+terminal;
+.B \-q
+silences stdout only.
+.IP \(bu 2
+Errors are per entry: counted, the first 24 collected, and reported on
+stderr at the end.
+A run never aborts part-way because of one failing entry.
+.IP \(bu 2
+.BR \-V ", " \-\-version
+prints the suite version; every tool reports the same number.
+.SH CONNECTION OPTIONS
+Every tool accepts the same connection options.
+.TP
+.BI \-\-endpoint " URL"
+S3 endpoint, for example
+.BR https://minio.example.com:9000 .
+Default: AWS,
+.BR https://s3.REGION.amazonaws.com .
+.TP
+.BI \-\-region " R"
+SigV4 signing region.
+Non-AWS services usually accept any value.
+Default
+.BR us\-east\-1 .
+.TP
+.BI \-\-profile " NAME"
+Profile to read from
+.I ~/.aws/credentials
+and
+.IR ~/.aws/config .
+.TP
+.B \-\-path\-style
+Use path-style addressing
+.RB ( host/bucket/key )
+instead of virtual-hosted
+.RB ( bucket.host/key ).
+Enabled automatically when the endpoint host is an IP address,
+.BR localhost ,
+or a single-label name.
+.TP
+.B \-\-no\-sign
+Anonymous (unsigned) access, for public buckets.
+.TP
+.B \-\-insecure
+Skip TLS certificate verification.
+.TP
+.BI \-\-ca\-bundle " FILE"
+CA bundle for endpoints with a private CA.
+.SH RESOLUTION ORDER
+Flags win, then environment, then profile files, then defaults.
+.TP
+Endpoint
+.B \-\-endpoint
+\(->
+.B S3M_ENDPOINT
+\(->
+.B AWS_ENDPOINT_URL_S3
+\(->
+.B AWS_ENDPOINT_URL
+\(-> profile
+.B endpoint_url
+\(-> AWS regional endpoint.
+.TP
+Region
+.B \-\-region
+\(->
+.B AWS_REGION
+\(->
+.B AWS_DEFAULT_REGION
+\(-> profile
+.B region
+\(->
+.BR us\-east\-1 .
+.TP
+Profile
+.B \-\-profile
+\(->
+.B AWS_PROFILE
+\(->
+.BR default .
+.TP
+Credentials
+.B AWS_ACCESS_KEY_ID
+and
+.B AWS_SECRET_ACCESS_KEY
+(plus
+.BR AWS_SESSION_TOKEN )
+\(-> profile in
+.I ~/.aws/credentials
+\(-> profile in
+.IR ~/.aws/config .
+.PP
+If no credentials are found the tool refuses to start; pass
+.B \-\-no\-sign
+explicitly for anonymous access.
+Requests are signed with AWS Signature Version 4.
+.SH LOAD BALANCING ACROSS ENDPOINT ADDRESSES
+The tools that run a worker pool against S3 accept
+.BR \-\-rrdns .
+It resolves the endpoint hostname (A and AAAA records) once at startup
+and gives each worker thread its own address from the list, round
+robin.
+With more threads than addresses, several threads share an address.
+.PP
+The TCP connection is pinned to the thread's address, but the
+.B Host
+header, TLS SNI and the SigV4 signature keep the original hostname, so
+certificates and Host-validating gateways are unaffected.
+If a thread's address fails (connection errors, timeouts, or 429/408/5xx
+after the retry budget is spent) the thread moves to the next address
+in the list.
+The endpoint must be a hostname, not a literal IP address.
+.SH RETRIES
+Throttling responses (HTTP 429, 503
+.BR SlowDown )
+and transient transport errors are retried up to 8 times with
+exponential backoff and jitter.
+Uploads use
+.B UNSIGNED\-PAYLOAD
+streaming; use HTTPS endpoints if payload signing matters to your
+threat model.
+.SH FILES
+.TP
+.I ~/.aws/credentials
+.TQ
+.I ~/.aws/config
+Profiles.
+.B AWS_SHARED_CREDENTIALS_FILE
+and
+.B AWS_CONFIG_FILE
+relocate them.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Completed with errors.
+.TP
+.B 2
+Usage error, startup failure, or a safety-guard refusal.
+.PP
+.BR s3m\-diff (1)
+uses diff-like codes instead; see its page.
+.SH SEE ALSO
+.BR s3m\-ls (1),
+.BR s3m\-du (1),
+.BR s3m\-rm (1),
+.BR s3m\-ver (1),
+.BR s3m\-sync (1),
+.BR s3m\-cp (1),
+.BR s3m\-find (1),
+.BR s3m\-diff (1)
+.PP
+Full documentation:
+.IR /usr/share/doc/s3m/docs/ .

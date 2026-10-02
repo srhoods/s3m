@@ -61,11 +61,41 @@ make            # builds all tools into ./bin
 make clean      # removes build artifacts
 ```
 
+Install, build a source tarball, or build RPMs:
+
+```sh
+sudo make install PREFIX=/usr   # binaries, man pages, docs (honours DESTDIR)
+make dist                       # s3m-VERSION.tar.gz of the committed tree
+make rpm                        # binary + source RPMs under ./rpmbuild
+```
+
+`make rpm` needs `rpm-build`; the RPM is built from
+[`packaging/s3m.spec.in`](packaging/s3m.spec.in). Every tool has a man
+page (`man s3m-sync`) and `man s3m` covers the shared connection
+options.
+
 Requirements: GCC (or Clang), GNU Make, glibc with POSIX threads, and
 development headers for libcurl and OpenSSL (`libcurl-devel` +
 `openssl-devel` on EL, `libcurl4-openssl-dev` + `libssl-dev` on
 Debian/Ubuntu). Requests are signed with an in-tree SigV4
 implementation, so any libcurl ≥ 7.32 is fine.
+
+## Versioning
+
+The whole suite shares one [Semantic Versioning](https://semver.org/)
+number, `MAJOR.MINOR.PATCH`, kept in the [`VERSION`](VERSION) file. The
+Makefile compiles it into every tool, so `s3m-ls --version` (any tool)
+reports it, and it feeds the RPM and the installed man pages.
+
+- **MAJOR**: incompatible change to command line options, CSV output
+  columns or exit codes that scripts may depend on.
+- **MINOR**: new tools, options or behaviour, backwards compatible.
+- **PATCH**: bug fixes only.
+
+Every change that users will notice goes in
+[CHANGELOG.md](CHANGELOG.md) under *Unreleased*. To release: move those
+entries under a new version heading, update `VERSION`, commit, and tag
+`vMAJOR.MINOR.PATCH`.
 
 ## Testing
 

@@ -1,0 +1,68 @@
+.TH S3M-RM 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-rm \- parallel object remover
+.SH SYNOPSIS
+.B s3m\-rm
+[\fIOPTIONS\fR] \fBs3://\fIBUCKET\fR/\fIKEY\fR|\fIPREFIX\fR/|\fIMASK\fR...
+.SH DESCRIPTION
+Removes objects in parallel using batched DeleteObjects requests.
+By default this is a \fBdry run\fR: everything that would be removed is listed as CSV and nothing is deleted.
+Add \fB\-\-apply\fR to delete.
+.SS Target forms
+.TP
+.B s3://bucket/some/key
+Exactly that key.
+.TP
+.B s3://bucket/some/prefix/
+Everything under the prefix (note the trailing slash).
+.TP
+.B s3://bucket/logs/2024\-*
+Glob mask (\fB*\fR, \fB?\fR, \fB[...]\fR; \fB*\fR also spans \fB/\fR).
+Quote masks so the shell leaves them alone.
+.SH OPTIONS
+.TP
+.B \-\-apply
+Actually remove.
+.TP
+.B \-\-permanent
+On versioned buckets, delete every stored version and delete marker of the matched keys instead of just writing a delete marker.
+Unrecoverable.
+.TP
+.B \-\-entire\-bucket
+Allow a target that spans a whole bucket.
+It is refused otherwise, and there is no short form.
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write the output to FILE and show a live progress display.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the console listing; progress and the summary are still shown.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH SAFETY
+Overlapping targets are de-duplicated so no key is deleted twice.
+A target spanning a whole bucket is refused unless \fB\-\-entire\-bucket\fR is given.
+.SH EXIT STATUS
+0 success; 1 completed with errors; 2 usage, startup or safety-guard refusal.
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-ver (1),
+.BR s3m\-find (1)

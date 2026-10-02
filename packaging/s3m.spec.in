@@ -1,0 +1,59 @@
+Name:           s3m
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Parallel S3 object manager: ls, du, rm, ver, sync, cp, find, diff
+License:        MIT
+URL:            https://github.com/srhoods/s3m
+Source0:        %{name}-%{version}.tar.gz
+
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  libcurl-devel
+BuildRequires:  openssl-devel
+
+%description
+s3m is a suite of command line tools that parallelise traditionally
+single-threaded object storage operations against Amazon S3 and
+S3-compatible services (MinIO, Ceph RGW, Wasabi, Backblaze B2,
+Cloudflare R2). They shard the key space by prefix and keep many
+requests in flight across a pool of worker threads.
+
+Included tools: s3m-ls, s3m-du, s3m-rm, s3m-ver, s3m-sync, s3m-cp,
+s3m-find and s3m-diff.
+
+%prep
+%autosetup -n %{name}-%{version}
+
+%build
+%make_build \
+    CFLAGS="%{optflags} -std=gnu11 -pthread -D_GNU_SOURCE" \
+    LDFLAGS="%{build_ldflags} -pthread"
+
+%install
+%make_install PREFIX=%{_prefix}
+# docs are packaged with %%doc / %%license below
+rm -rf %{buildroot}%{_prefix}/share/doc/s3m
+
+%check
+for t in ls du rm ver sync cp find diff; do
+    out=$(bin/s3m-$t --version)
+    case "$out" in "s3m-$t %{version} "*) ;; *) echo "bad version: $out"; exit 1;; esac
+done
+
+%files
+%license LICENSE.md
+%doc README.md CHANGELOG.md docs
+%{_bindir}/s3m-ls
+%{_bindir}/s3m-du
+%{_bindir}/s3m-rm
+%{_bindir}/s3m-ver
+%{_bindir}/s3m-sync
+%{_bindir}/s3m-cp
+%{_bindir}/s3m-find
+%{_bindir}/s3m-diff
+%{_mandir}/man1/s3m-*.1*
+%{_mandir}/man7/s3m.7*
+
+%changelog
+* Fri Oct 02 2026 Steven Rhoods <steven@rhoods.com> - @VERSION@-1
+- Package the s3m suite; see CHANGELOG.md for the full history
