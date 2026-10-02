@@ -27,8 +27,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define S3M_DIFF_VERSION "1.1.0"
-
 #define CHUNK ((uint64_t)8 << 20)      /* content compare chunk */
 
 struct side {
@@ -789,7 +787,7 @@ int main(int argc, char **argv)
             return 0;
         case 'V':
             printf("s3m-diff %s (s3m: Parallel S3 Object Manager)\n",
-                   S3M_DIFF_VERSION);
+                   S3M_VERSION);
             return 0;
         default:
             usage(stderr);

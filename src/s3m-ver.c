@@ -21,8 +21,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#define S3M_VER_VERSION "1.0.0"
-
 static struct {
     long        keep;            /* non-current versions to keep; -1 off */
     int64_t     older;           /* age threshold in seconds; -1 off     */
@@ -563,7 +561,7 @@ int main(int argc, char **argv)
             return 0;
         case 'V':
             printf("s3m-ver %s (s3m: Parallel S3 Object Manager)\n",
-                   S3M_VER_VERSION);
+                   S3M_VERSION);
             return 0;
         default:
             usage(stderr);

@@ -22,8 +22,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#define S3M_LS_VERSION "1.0.0"
-
 enum detail_mode { MODE_BASIC, MODE_STANDARD, MODE_FULL };
 
 static const char *mode_names[] = { "basic", "standard", "full" };
@@ -412,7 +410,7 @@ int main(int argc, char **argv)
             return 0;
         case 'V':
             printf("s3m-ls %s (s3m: Parallel S3 Object Manager)\n",
-                   S3M_LS_VERSION);
+                   S3M_VERSION);
             return 0;
         default:
             usage(stderr);

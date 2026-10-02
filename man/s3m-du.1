@@ -1,0 +1,62 @@
+.TH S3M-DU 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-du \- parallel object storage usage reporter
+.SH SYNOPSIS
+.B s3m\-du
+[\fIOPTIONS\fR] \fBs3://\fIBUCKET\fR[\fB/\fIPREFIX\fR]...
+.SH DESCRIPTION
+Summarises object storage usage by prefix, in parallel.
+Output is du-style: size, a tab, then the prefix (and the storage class with \fB\-\-by\-class\fR).
+.SH OPTIONS
+.TP
+.BR \-s ", " \-\-summarize
+Only print a total for each URI argument.
+.TP
+.BR \-d ", " \-\-max\-depth " N"
+Print prefixes at most N levels below each URI.
+.TP
+.BR \-c ", " \-\-total
+Also print a grand total.
+.TP
+.BR \-h ", " \-\-human\-readable
+Sizes in powers of 1024.
+.TP
+.B \-\-si
+Sizes in powers of 1000.
+.TP
+.B \-\-by\-class
+Break every line down by storage class.
+.TP
+.B \-\-versions
+Include non-current versions and delete markers, which is what is actually stored and billed on versioned buckets.
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write the report to FILE and show live progress.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the report on stdout; the summary is still shown.
+.TP
+.B \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH EXIT STATUS
+0 success; 1 completed with errors; 2 usage, startup or safety-guard refusal.
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-ls (1)

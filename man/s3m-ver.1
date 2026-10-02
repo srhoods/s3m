@@ -1,0 +1,65 @@
+.TH S3M-VER 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-ver \- object version and delete-marker manager
+.SH SYNOPSIS
+.B s3m\-ver
+[\fIOPTIONS\fR] \fBs3://\fIBUCKET\fR[\fB/\fIPREFIX\fR]...
+.SH DESCRIPTION
+Lists and manages object versions and delete markers.
+With no pruning options it lists every stored version as CSV.
+With pruning options it is a \fBdry run\fR listing what would be deleted; add \fB\-\-apply\fR to delete.
+.SH PRUNING OPTIONS
+.TP
+.BI \-\-keep " N"
+Per key, keep the newest N non-current versions (in addition to the current version) and delete the rest.
+\fB\-\-keep 0\fR keeps only the current version.
+.TP
+.BI \-\-older\-than " DUR"
+Only delete versions older than DUR (\fB30d\fR, \fB12h\fR, \fB45m\fR, \fB4w\fR).
+Combined with \fB\-\-keep\fR, a version must fail both tests to be deleted.
+.TP
+.B \-\-markers
+Also delete a key's delete markers when the key is left with no versions at all (tombstone cleanup).
+.TP
+.B \-\-only\-markers
+Delete nothing but delete markers.
+Removing a latest marker undeletes the object.
+.TP
+.B \-\-latest
+Allow \fB\-\-older\-than\fR to delete the current version too; the previous version becomes current.
+.TP
+.B \-\-apply
+Actually delete.
+.SH OTHER OPTIONS
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write the CSV to FILE and show live progress.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the console listing.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH EXIT STATUS
+0 success; 1 completed with errors; 2 usage, startup or safety-guard refusal.
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-rm (1),
+.BR s3m\-find (1)

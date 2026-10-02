@@ -29,8 +29,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define S3M_CP_VERSION "1.1.0"
-
 struct target {
     bool  is_s3;
     char  bucket[256];        /* s3 sources only                        */
@@ -776,7 +774,7 @@ int main(int argc, char **argv)
             return 0;
         case 'V':
             printf("s3m-cp %s (s3m: Parallel S3 Object Manager)\n",
-                   S3M_CP_VERSION);
+                   S3M_VERSION);
             return 0;
         default:
             usage(stderr);

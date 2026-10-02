@@ -1,0 +1,54 @@
+.TH S3M-LS 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-ls \- parallel bucket lister
+.SH SYNOPSIS
+.B s3m\-ls
+[\fIOPTIONS\fR] \fBs3://\fIBUCKET\fR[\fB/\fIPREFIX\fR]...
+.SH DESCRIPTION
+Lists objects in one or more buckets or prefixes with a pool of worker threads and emits every object found as CSV.
+Parallelism comes from prefix sharding: delimiter listings discover the directory structure of the key space and each discovered prefix is listed concurrently.
+.SH OPTIONS
+.TP
+.BR \-m ", " \-\-mode " LEVEL"
+Detail level.
+\fBbasic\fR (default) prints the key; \fBstandard\fR adds size, mtime, etag and storage class; \fBfull\fR adds owner, content type, version id and server-side encryption, at the cost of one extra HEAD request per object.
+\fBb\fR, \fBs\fR and \fBf\fR are accepted.
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.BI \-\-class " CLASSES"
+Only output objects of these storage classes (comma-separated, case-insensitive), for example \fB\-\-class STANDARD,GLACIER\fR.
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write the output to FILE and show a live progress display.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the console listing; progress and the summary are still shown.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH OUTPUT
+Output order is non-deterministic; pipe through
+.BR sort (1)
+for a stable order.
+.SH EXIT STATUS
+0 success; 1 completed with errors; 2 usage, startup or safety-guard refusal.
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-du (1),
+.BR s3m\-find (1)

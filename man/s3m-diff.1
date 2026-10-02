@@ -1,0 +1,58 @@
+.TH S3M-DIFF 1 "" "s3m @VERSION@" "s3m Manual"
+.SH NAME
+s3m\-diff \- parallel bucket and prefix comparison
+.SH SYNOPSIS
+.B s3m\-diff
+[\fIOPTIONS\fR] \fILEFT\fR \fIRIGHT\fR
+.SH DESCRIPTION
+Compares two sides in parallel and reports every difference as CSV, ending with a summary and a plain-language verdict.
+Each side is an \fBs3://BUCKET[/PREFIX]\fR URI or a local directory (both local is refused; use p3m\-diff).
+Read-only: nothing on either side is modified.
+.PP
+By default keys, sizes and conclusive etags are compared.
+Single-part uploads have the content MD5 as their etag, so equality there is content verification.
+Local files have no etag, so a local-versus-S3 run compares keys and sizes.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-checksum
+Verify contents where the cheap checks are inconclusive: a local MD5 against a conclusive etag where possible (no network I/O), otherwise chunked reads or ranged GETs that stop at the first differing byte and report its offset.
+Sizes gate everything: size-mismatched objects are never read.
+.TP
+.BR \-j ", " \-\-threads " N"
+Worker threads, 1\-256 (default 16).
+.TP
+.BI \-\-shard\-depth " N"
+Prefix levels expanded for parallelism, 0\-9 (default 2).
+.TP
+.B \-\-rrdns
+Resolve the endpoint hostname to every A/AAAA address and spread worker threads across them, moving a thread to the next address if its current one fails.
+See
+.BR s3m (7).
+.TP
+.BR \-o ", " \-\-output " FILE"
+Write the CSV to FILE and show live progress.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress the listing; the summary and verdict still print, making this a fast "are these the same?" check.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show the version and exit.
+.SH CONNECTION OPTIONS
+The connection options \fB\-\-endpoint\fR, \fB\-\-region\fR, \fB\-\-profile\fR, \fB\-\-path\-style\fR, \fB\-\-no\-sign\fR, \fB\-\-insecure\fR and \fB\-\-ca\-bundle\fR are common to all s3m tools and are described in
+.BR s3m (7).
+.SH EXIT STATUS
+.TP
+.B 0
+No differences.
+.TP
+.B 1
+Differences found.
+.TP
+.B 2
+Usage error, or the comparison hit errors (the verdict is withheld because coverage was incomplete).
+.SH SEE ALSO
+.BR s3m (7)
+.BR s3m\-sync (1)

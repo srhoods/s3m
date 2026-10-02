@@ -31,8 +31,6 @@
 #include <unistd.h>
 
 
-#define S3M_SYNC_VERSION "1.2.0"
-
 enum smode { M_UPLOAD, M_DOWNLOAD, M_REMOTE, M_LOCAL };
 
 struct side {
@@ -970,7 +968,7 @@ int main(int argc, char **argv)
             return 0;
         case 'V':
             printf("s3m-sync %s (s3m: Parallel S3 Object Manager)\n",
-                   S3M_SYNC_VERSION);
+                   S3M_VERSION);
             return 0;
         default:
             usage(stderr);
